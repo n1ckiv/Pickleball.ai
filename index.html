@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pickleball Rotation Scheduler</title>
+<style>
+  /* ---------- Base / mobile-first ---------- */
+  :root {
+    --ink: #111111;
+    --paper: #ffffff;
+    --line: #444444;
+    --muted: #f2f2f2;
+    --accent: #14532d;
+    --warn-bg: #fff4d6;
+    --warn-line: #8a6d1f;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 16px;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 18px;
+    line-height: 1.45;
+  }
+
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 22px; margin: 0 0 12px; }
+  h3 { font-size: 19px; margin: 0 0 8px; }
+
+  .subtitle { margin: 0 0 20px; font-size: 16px; color: #333; }
+
+  /* ---------- Form ---------- */
+  label {
+    display: block;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+
+  .hint { font-weight: 400; font-size: 15px; color: #333; }
+
+  textarea, input[type="number"] {
+    width: 100%;
+    font-family: inherit;
+    font-size: 18px;
+    color: var(--ink);
+    background: var(--paper);
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    padding: 10px;
+    min-height: 44px;
+  }
+
+  textarea { min-height: 190px; resize: vertical; }
+
+  .field { margin-bottom: 18px; }
+
+  /* Number inputs sit side by side once there is room. */
+  .number-fields { display: grid; grid-template-columns: 1fr; gap: 18px; }
+
+  button {
+    width: 100%;
+    min-height: 56px;
+    font-family: inherit;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--paper);
+    background: var(--accent);
+    border: 2px solid var(--accent);
+    border-radius: 6px;
+    padding: 12px;
+    cursor: pointer;
+  }
+
+  button:active { background: #0b3a1f; }
+
+  /* ---------- Notices ---------- */
+  .notice {
+    border: 2px solid var(--warn-line);
+    background: var(--warn-bg);
+    border-radius: 6px;
+    padding: 12px;
+    margin: 20px 0;
+    font-size: 17px;
+  }
+
+  .notice.error { border-color: #8a1f1f; background: #ffe3e3; }
+  .notice p { margin: 0 0 8px; }
+  .notice p:last-child { margin-bottom: 0; }
+
+  /* ---------- Results ---------- */
+  .stats {
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    padding: 12px;
+    margin: 20px 0;
+    background: var(--muted);
+    font-size: 17px;
+  }
+
+  .stats ul { margin: 8px 0 0; padding-left: 22px; }
+
+  .round-card {
+    border: 3px solid var(--ink);
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 20px;
+  }
+
+  .court-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+
+  .court {
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    padding: 12px;
+  }
+
+  .court-name { font-weight: 700; margin: 0 0 8px; }
+
+  .team { margin: 0; padding: 6px 0; font-size: 18px; }
+
+  .vs {
+    font-weight: 700;
+    text-align: center;
+    margin: 4px 0;
+    letter-spacing: 1px;
+  }
+
+  .sit-outs {
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 2px dashed var(--line);
+    font-size: 17px;
+  }
+
+  .tag {
+    display: inline-block;
+    font-size: 14px;
+    font-weight: 700;
+    border: 2px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 6px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+
+  /* ---------- Wider screens (iPad landscape ~1024px) ---------- */
+  @media (min-width: 700px) {
+    body { padding: 24px 32px; max-width: 1100px; margin: 0 auto; }
+    .number-fields { grid-template-columns: repeat(3, 1fr); }
+    button { width: auto; min-width: 260px; }
+    .court-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  @media (min-width: 1000px) {
+    .court-grid { grid-template-columns: repeat(3, 1fr); }
+  }
+</style>
+</head>
+<body>
+
+<h1>Pickleball Rotation Scheduler</h1>
+<p class="subtitle">Enter your players, choose your courts and rounds, and generate a rotation.</p>
+
+<div class="field">
+  <label for="playerNames">
+    Player names
+    <span class="hint">— one per line. Optionally end a name with M or F, e.g. "Sam F".</span>
+  </label>
+  <textarea id="playerNames" spellcheck="false">Alice F
+Ben M
+Cara F
+Dan M
+Eve F
+Femi M
+Gita F
+Hank M
+Iris F
+Jon M
+Kim F
+Luis M</textarea>
+</div>
+
+<div class="number-fields">
+  <div class="field">
+    <label for="numCourts">Number of courts</label>
+    <input type="number" id="numCourts" value="4" min="1" max="20">
+  </div>
+  <div class="field">
+    <label for="numRounds">Number of rounds</label>
+    <input type="number" id="numRounds" value="5" min="1" max="30">
+  </div>
+  <div class="field">
+    <label for="playersPerCourt">Players per court</label>
+    <input type="number" id="playersPerCourt" value="4" min="2" max="8">
+  </div>
+</div>
+
+<div class="field">
+  <button id="generateButton" type="button">Generate schedule</button>
+</div>
+
+<div id="messages"></div>
+<div id="results"></div>
+
+<script>
+/* =========================================================================
+   PICKLEBALL ROTATION SCHEDULER
+
+   The approach in one sentence: we build thousands of random-but-valid
+   schedules, give each one a score (lower is better), and keep the best.
+
+   This is called "randomized restarts". We do NOT try to obey the
+   constraints as hard rules, because for most player counts a perfect
+   schedule is impossible. Instead the constraints become penalties, and
+   we hunt for the schedule with the smallest total penalty.
+   ========================================================================= */
+
+
+/* -------------------------------------------------------------------------
+   TUNING CONSTANTS
+   These are the penalty weights described in the scoring section below.
+   ------------------------------------------------------------------------- */
+const ATTEMPT_COUNT              = 10000; // how many random schedules to try
+const PENALTY_REPEAT_PARTNER     = 10;    // per repeated partner pairing
+const PENALTY_REPEAT_OPPONENT    = 5;     // per repeated opponent pairing
+const PENALTY_SITOUT_IMBALANCE   = 8;     // per unit of (most sat - least sat)
+const PENALTY_SAME_COURT_IN_A_ROW = 3;    // per player stuck on same court no.
+
+
+/* =========================================================================
+   SECTION 1 — READING THE INPUTS
+   ========================================================================= */
+
+/**
+ * Turns the textarea contents into a list of player objects.
+ * A trailing " M" or " F" (any case) is treated as gender and stored.
+ * Gender is deliberately not used by the algorithm yet.
+ */
+function parsePlayers(rawText) {
+  const lines = rawText.split("\n");
+  const players = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === "") continue; // skip blank lines
+
+    // Look for a name that ends with a space then a single M or F.
+    const genderMatch = trimmed.match(/^(.*\S)\s+([MFmf])$/);
+
+    if (genderMatch) {
+      players.push({
+        index: players.length,
+        name: genderMatch[1],
+        gender: genderMatch[2].toUpperCase()
+      });
+    } else {
+      players.push({
+        index: players.length,
+        name: trimmed,
+        gender: null
+      });
+    }
+  }
+
+  return players;
+}
+
+/** Reads a number input, falling back to a default if it is blank or invalid. */
+function readNumberInput(elementId, fallbackValue) {
+  const value = parseInt(document.getElementById(elementId).value, 10);
+  return Number.isFinite(value) && value > 0 ? value : fallbackValue;
+}
+
+
+/* =========================================================================
+   SECTION 2 — WORKING OUT THE SHAPE OF A ROUND
+
+   Before we can place anyone, we need to know how many courts will run and
+   how big each one is. This is the same for every round, so we only do it
+   once per schedule.
+   ========================================================================= */
+
+/**
+ * Decides how many courts run in a round and how many players sit out.
+ *
+ * Rules:
+ *  - Fill as many full courts as possible (up to the number of courts).
+ *  - If exactly 2 players are left over AND a court is still free,
+ *    give them that court as a 1v1 singles game.
+ *  - Anybody still left over sits out.
+ */
+function planRoundShape(playerCount, courtCount, playersPerCourt) {
+  const courtSizes = [];
+  let unplaced = playerCount;
+
+  // Deal out full courts while we have both players and courts to spare.
+  while (courtSizes.length < courtCount && unplaced >= playersPerCourt) {
+    courtSizes.push(playersPerCourt);
+    unplaced -= playersPerCourt;
+  }
+
+  // Exactly two spare players get a singles court, if one is free.
+  if (unplaced === 2 && courtSizes.length < courtCount) {
+    courtSizes.push(2);
+    unplaced = 0;
+  }
+
+  return { courtSizes: courtSizes, sitOutCount: unplaced };
+}
+
+
+/* =========================================================================
+   SECTION 3 — BUILDING ONE RANDOM SCHEDULE
+   ========================================================================= */
+
+/** Fisher-Yates shuffle. Returns a new array; does not modify the original. */
+function shuffleArray(items) {
+  const copy = items.slice();
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const swap = copy[i];
+    copy[i] = copy[j];
+    copy[j] = swap;
+  }
+  return copy;
+}
+
+/**
+ * Picks who sits out this round.
+ *
+ * We always choose from the players who have sat out the fewest times so
+ * far, breaking ties at random. That guarantees nobody sits twice before
+ * everyone has sat once, while still giving the random search real variety.
+ */
+function chooseSitOuts(players, sitOutTally, howMany) {
+  if (howMany <= 0) return [];
+
+  // Shuffle first so that players with an equal tally are ordered randomly,
+  // then sort by tally. A stable sort keeps that random order within ties.
+  const shuffled = shuffleArray(players);
+  const byFewestSitOuts = shuffled.sort(function (a, b) {
+    return sitOutTally[a.index] - sitOutTally[b.index];
+  });
+
+  const chosen = byFewestSitOuts.slice(0, howMany);
+  for (const player of chosen) {
+    sitOutTally[player.index] += 1;
+  }
+  return chosen;
+}
+
+/**
+ * Splits one court's players into two teams.
+ * With 4 players that is 2 v 2; with 2 players it is a 1 v 1 singles game.
+ */
+function splitIntoTeams(courtPlayers) {
+  const halfway = Math.ceil(courtPlayers.length / 2);
+  return {
+    teamOne: courtPlayers.slice(0, halfway),
+    teamTwo: courtPlayers.slice(halfway)
+  };
+}
+
+/**
+ * Builds one complete, valid schedule at random.
+ * "Valid" means court sizes and sit-out counts are correct — it says
+ * nothing about quality. Quality is what the scoring function measures.
+ */
+function buildRandomSchedule(players, roundCount, roundShape) {
+  const sitOutTally = players.map(function () { return 0; });
+  const rounds = [];
+
+  for (let roundNumber = 0; roundNumber < roundCount; roundNumber++) {
+    const sitOuts = chooseSitOuts(players, sitOutTally, roundShape.sitOutCount);
+
+    // Everyone not sitting out is available, in random order.
+    const sittingOutIndexes = new Set(sitOuts.map(function (p) { return p.index; }));
+    const available = shuffleArray(players.filter(function (p) {
+      return !sittingOutIndexes.has(p.index);
+    }));
+
+    // Deal the shuffled players into the courts, in order.
+    const courts = [];
+    let nextPlayer = 0;
+    for (const size of roundShape.courtSizes) {
+      const courtPlayers = available.slice(nextPlayer, nextPlayer + size);
+      nextPlayer += size;
+      courts.push(splitIntoTeams(courtPlayers));
+    }
+
+    rounds.push({ courts: courts, sitOuts: sitOuts });
+  }
+
+  return { rounds: rounds, sitOutTally: sitOutTally };
+}
+
+
+/* =========================================================================
+   SECTION 4 — SCORING A SCHEDULE
+
+   Lower is better. The four penalties are:
+     +10 per repeated partner pairing
+     +5  per repeated opponent pairing
+     +8  per unit of sit-out imbalance (most sat-out minus least)
+     +3  each time a player is on the same court number two rounds running
+   ========================================================================= */
+
+/** Builds a stable key for a pair of players, e.g. "3|7". Order doesn't matter. */
+function makePairKey(playerA, playerB) {
+  const low = Math.min(playerA.index, playerB.index);
+  const high = Math.max(playerA.index, playerB.index);
+  return low + "|" + high;
+}
+
+/** Records every pair inside one team as having partnered together. */
+function recordPartnerPairs(team, counts) {
+  for (let i = 0; i < team.length; i++) {
+    for (let j = i + 1; j < team.length; j++) {
+      const key = makePairKey(team[i], team[j]);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+}
+
+/** Records every cross-team pair as having faced each other. */
+function recordOpponentPairs(teamOne, teamTwo, counts) {
+  for (const playerA of teamOne) {
+    for (const playerB of teamTwo) {
+      const key = makePairKey(playerA, playerB);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+}
+
+/**
+ * Counts how many times a pairing happened more than once.
+ * A pair that plays together 3 times contributes 2 repeats.
+ */
+function countRepeats(pairCounts) {
+  let repeats = 0;
+  for (const timesTogether of pairCounts.values()) {
+    if (timesTogether > 1) repeats += timesTogether - 1;
+  }
+  return repeats;
+}
+
+/**
+ * Scores a schedule and also returns the raw numbers behind the score,
+ * so we can show the user what the repeats actually are.
+ */
+function scoreSchedule(schedule, playerCount) {
+  const partnerCounts = new Map();
+  const opponentCounts = new Map();
+
+  // Remembers which court number each player was on in the previous round.
+  // -1 means "was not on a court last round".
+  let previousCourtOf = new Array(playerCount).fill(-1);
+  let sameCourtInARow = 0;
+
+  for (const round of schedule.rounds) {
+    const currentCourtOf = new Array(playerCount).fill(-1);
+
+    round.courts.forEach(function (court, courtNumber) {
+      recordPartnerPairs(court.teamOne, partnerCounts);
+      recordPartnerPairs(court.teamTwo, partnerCounts);
+      recordOpponentPairs(court.teamOne, court.teamTwo, opponentCounts);
+
+      for (const player of court.teamOne.concat(court.teamTwo)) {
+        currentCourtOf[player.index] = courtNumber;
+        if (previousCourtOf[player.index] === courtNumber) {
+          sameCourtInARow += 1;
+        }
+      }
+    });
+
+    previousCourtOf = currentCourtOf;
+  }
+
+  const repeatedPartners = countRepeats(partnerCounts);
+  const repeatedOpponents = countRepeats(opponentCounts);
+
+  const mostSitOuts = Math.max.apply(null, schedule.sitOutTally);
+  const leastSitOuts = Math.min.apply(null, schedule.sitOutTally);
+  const sitOutImbalance = mostSitOuts - leastSitOuts;
+
+  const score =
+      repeatedPartners  * PENALTY_REPEAT_PARTNER
+    + repeatedOpponents * PENALTY_REPEAT_OPPONENT
+    + sitOutImbalance   * PENALTY_SITOUT_IMBALANCE
+    + sameCourtInARow   * PENALTY_SAME_COURT_IN_A_ROW;
+
+  return {
+    score: score,
+    repeatedPartners: repeatedPartners,
+    repeatedOpponents: repeatedOpponents,
+    sitOutImbalance: sitOutImbalance,
+    sameCourtInARow: sameCourtInARow,
+    mostSitOuts: mostSitOuts,
+    leastSitOuts: leastSitOuts
+  };
+}
+
+
+/* =========================================================================
+   SECTION 5 — THE SEARCH
+
+   Build ATTEMPT_COUNT random schedules, score each one, keep the best.
+   ========================================================================= */
+
+function findBestSchedule(players, roundCount, roundShape) {
+  const startTime = performance.now();
+
+  let bestSchedule = null;
+  let bestReport = null;
+
+  for (let attempt = 0; attempt < ATTEMPT_COUNT; attempt++) {
+    const candidate = buildRandomSchedule(players, roundCount, roundShape);
+    const report = scoreSchedule(candidate, players.length);
+
+    if (bestReport === null || report.score < bestReport.score) {
+      bestSchedule = candidate;
+      bestReport = report;
+      if (report.score === 0) break; // cannot do better than perfect
+    }
+  }
+
+  return {
+    schedule: bestSchedule,
+    report: bestReport,
+    attemptsRun: ATTEMPT_COUNT,
+    elapsedMs: performance.now() - startTime
+  };
+}
+
+
+/* =========================================================================
+   SECTION 6 — THE FEASIBILITY CHECK
+
+   Each round a player meets (playersPerCourt - 1) other people. Over R
+   rounds that is R x (playersPerCourt - 1) "encounter slots". There are
+   only (totalPlayers - 1) other people in the room. If the slots outnumber
+   the people, some encounters MUST repeat — no algorithm can avoid it.
+   ========================================================================= */
+
+function checkFeasibility(playerCount, roundCount, playersPerCourt) {
+  const encounterSlotsPerPlayer = roundCount * (playersPerCourt - 1);
+  const otherPlayersAvailable = playerCount - 1;
+  const unavoidableRepeats = Math.max(0, encounterSlotsPerPlayer - otherPlayersAvailable);
+
+  return {
+    encounterSlotsPerPlayer: encounterSlotsPerPlayer,
+    otherPlayersAvailable: otherPlayersAvailable,
+    unavoidableRepeats: unavoidableRepeats,
+    zeroRepeatsPossible: unavoidableRepeats === 0
+  };
+}
+
+
+/* =========================================================================
+   SECTION 7 — PUTTING IT ON THE SCREEN
+   ========================================================================= */
+
+const messagesElement = document.getElementById("messages");
+const resultsElement = document.getElementById("results");
+
+/** Small helper so we never build HTML by gluing user text into strings. */
+function createElement(tagName, className, textContent) {
+  const element = document.createElement(tagName);
+  if (className) element.className = className;
+  if (textContent !== undefined) element.textContent = textContent;
+  return element;
+}
+
+function clearScreen() {
+  messagesElement.textContent = "";
+  resultsElement.textContent = "";
+}
+
+function showError(message) {
+  const box = createElement("div", "notice error");
+  box.appendChild(createElement("p", null, message));
+  messagesElement.appendChild(box);
+}
+
+/** Joins player names with "&", e.g. "Alice & Ben". */
+function describeTeam(team) {
+  return team.map(function (player) { return player.name; }).join(" & ");
+}
+
+/** The plain-English notice about whether zero repeats is even possible. */
+function renderFeasibilityNotice(feasibility, playerCount, roundCount) {
+  const box = createElement("div", "notice");
+
+  if (feasibility.zeroRepeatsPossible) {
+    box.appendChild(createElement("p",  null,
+      playerCount + " players over " + roundCount + " rounds: there are enough " +
+      "different people to go round, so a schedule with no repeat matchups " +
+      "should be possible."));
+  } else {
+    box.appendChild(createElement("p", null,
+      playerCount + " players over " + roundCount + " rounds: at least " +
+      feasibility.unavoidableRepeats + " repeat " +
+      (feasibility.unavoidableRepeats === 1 ? "matchup is" : "matchups are") +
+      " unavoidable. Showing the schedule that spreads them most evenly."));
+  }
+
+  box.appendChild(createElement("p", null,
+    "Each player meets " + feasibility.encounterSlotsPerPlayer +
+    " others across the session, but there are only " +
+    feasibility.otherPlayersAvailable + " other players to meet."));
+
+  messagesElement.appendChild(box);
+}
+
+/** The summary panel: score, timing, and the repeats we actually ended up with. */
+function renderStats(result) {
+  const report = result.report;
+  const box = createElement("div", "stats");
+
+  box.appendChild(createElement("h3", null, "Result"));
+  box.appendChild(createElement("p", null,
+    "Best score: " + report.score + " (lower is better) — found by trying " +
+    result.attemptsRun.toLocaleString() + " random schedules in " +
+    Math.round(result.elapsedMs) + " ms."));
+
+  const list = createElement("ul");
+  list.appendChild(createElement("li", null,
+    report.repeatedPartners + " repeated partner " +
+    (report.repeatedPartners === 1 ? "pairing" : "pairings")));
+  list.appendChild(createElement("li", null,
+    report.repeatedOpponents + " repeated opponent " +
+    (report.repeatedOpponents === 1 ? "pairing" : "pairings")));
+  list.appendChild(createElement("li", null,
+    "Sit-outs range from " + report.leastSitOuts + " to " + report.mostSitOuts +
+    " per player (imbalance of " + report.sitOutImbalance + ")"));
+  list.appendChild(createElement("li", null,
+    report.sameCourtInARow + " " +
+    (report.sameCourtInARow === 1 ? "time a player stays" : "times a player stays") +
+    " on the same court two rounds running"));
+  box.appendChild(list);
+
+  resultsElement.appendChild(box);
+}
+
+/** Draws one court: the two teams and a VS between them. */
+function renderCourt(court, courtNumber) {
+  const isSingles = court.teamOne.length === 1 && court.teamTwo.length === 1;
+
+  const card = createElement("div", "court");
+  const heading = createElement("p", "court-name", "Court " + (courtNumber + 1));
+  if (isSingles) {
+    heading.appendChild(createElement("span", "tag", "SINGLES"));
+  }
+  card.appendChild(heading);
+
+  card.appendChild(createElement("p", "team", describeTeam(court.teamOne)));
+  card.appendChild(createElement("p", "vs", "vs"));
+  card.appendChild(createElement("p", "team", describeTeam(court.teamTwo)));
+
+  return card;
+}
+
+/** Draws one round card: all its courts, plus who is sitting out. */
+function renderRound(round, roundNumber) {
+  const card = createElement("div", "round-card");
+  card.appendChild(createElement("h2", null, "Round " + (roundNumber + 1)));
+
+  const grid = createElement("div", "court-grid");
+  round.courts.forEach(function (court, courtNumber) {
+    grid.appendChild(renderCourt(court, courtNumber));
+  });
+  card.appendChild(grid);
+
+  const sitOutLine = createElement("p", "sit-outs");
+  if (round.sitOuts.length === 0) {
+    sitOutLine.textContent = "Sitting out: nobody — everyone plays this round.";
+  } else {
+    sitOutLine.textContent = "Sitting out: " +
+      round.sitOuts.map(function (p) { return p.name; }).join(", ");
+  }
+  card.appendChild(sitOutLine);
+
+  return card;
+}
+
+function renderSchedule(schedule) {
+  schedule.rounds.forEach(function (round, roundNumber) {
+    resultsElement.appendChild(renderRound(round, roundNumber));
+  });
+}
+
+
+/* =========================================================================
+   SECTION 8 — WIRING IT ALL TOGETHER
+   ========================================================================= */
+
+function handleGenerateClick() {
+  clearScreen();
+
+  const players = parsePlayers(document.getElementById("playerNames").value);
+  const courtCount = readNumberInput("numCourts", 4);
+  const roundCount = readNumberInput("numRounds", 5);
+  const playersPerCourt = readNumberInput("playersPerCourt", 4);
+
+  // --- Basic sanity checks before we spend time searching ---
+  if (playersPerCourt < 2) {
+    showError("You need at least 2 players per court.");
+    return;
+  }
+  if (players.length < playersPerCourt) {
+    showError("You have " + players.length + " player(s) but need at least " +
+              playersPerCourt + " to fill a single court.");
+    return;
+  }
+
+  const roundShape = planRoundShape(players.length, courtCount, playersPerCourt);
+  if (roundShape.courtSizes.length === 0) {
+    showError("Not enough players to fill any court with these settings.");
+    return;
+  }
+
+  // --- Tell the user up front whether zero repeats is achievable ---
+  const feasibility = checkFeasibility(players.length, roundCount, playersPerCourt);
+  renderFeasibilityNotice(feasibility, players.length, roundCount);
+
+  // --- Search, then show what we found ---
+  const result = findBestSchedule(players, roundCount, roundShape);
+  renderStats(result);
+  renderSchedule(result.schedule);
+}
+
+document.getElementById("generateButton").addEventListener("click", handleGenerateClick);
+</script>
+
+</body>
+</html>
