@@ -14,6 +14,7 @@
     --accent: #14532d;
     --warn-bg: #fff4d6;
     --warn-line: #8a6d1f;
+    --danger: #8a1f1f;
   }
 
   * { box-sizing: border-box; }
@@ -34,6 +35,37 @@
 
   .subtitle { margin: 0 0 20px; font-size: 16px; color: #333; }
 
+  /* ---------- Screen switching ---------- */
+  .screen[hidden] { display: none; }
+
+  .tab-bar {
+    display: flex;
+    gap: 8px;
+    margin: 0 0 20px;
+    border-bottom: 3px solid var(--ink);
+    padding-bottom: 12px;
+  }
+
+  .tab-button {
+    flex: 1;
+    width: auto; /* flex sizes these, not the 100% width other buttons get */
+    min-height: 48px;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--ink);
+    background: var(--paper);
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    padding: 10px 12px;
+    cursor: pointer;
+  }
+
+  .tab-button[aria-selected="true"] {
+    background: var(--ink);
+    border-color: var(--ink);
+    color: var(--paper);
+  }
+
   /* ---------- Form ---------- */
   label {
     display: block;
@@ -43,7 +75,7 @@
 
   .hint { font-weight: 400; font-size: 15px; color: #333; }
 
-  textarea, input[type="number"] {
+  input[type="number"], input[type="text"], select {
     width: 100%;
     font-family: inherit;
     font-size: 18px;
@@ -52,10 +84,8 @@
     border: 2px solid var(--line);
     border-radius: 6px;
     padding: 10px;
-    min-height: 44px;
+    min-height: 48px;
   }
-
-  textarea { min-height: 190px; resize: vertical; }
 
   .field { margin-bottom: 18px; }
 
@@ -78,6 +108,65 @@
 
   button:active { background: #0b3a1f; }
 
+  /* Outlined buttons for lower-stakes actions. */
+  button.secondary {
+    color: var(--ink);
+    background: var(--paper);
+    border-color: var(--line);
+    font-size: 17px;
+    min-height: 48px;
+  }
+
+  button.secondary:active { background: var(--muted); }
+
+  button.danger { color: var(--paper); background: var(--danger); border-color: var(--danger); }
+
+  /* A row of small buttons that share the width. */
+  .button-row { display: flex; gap: 10px; margin-bottom: 18px; }
+  .button-row button { width: auto; flex: 1; }
+
+  /* ---------- Checkbox and radio lists ---------- */
+  .check-list {
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    padding: 4px 12px;
+    margin-bottom: 14px;
+  }
+
+  /* Whole row is tappable, and tall enough to hit comfortably. */
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 48px;
+    padding: 6px 0;
+    font-weight: 400;
+    margin: 0;
+    border-bottom: 1px solid #ddd;
+    cursor: pointer;
+  }
+
+  .check-row:last-child { border-bottom: none; }
+
+  .check-row input[type="checkbox"],
+  .check-row input[type="radio"] {
+    width: 26px;
+    height: 26px;
+    flex: none;
+    margin: 0;
+  }
+
+  .radio-row { display: flex; gap: 20px; }
+  .radio-row .check-row { border-bottom: none; }
+
+  .empty-note {
+    border: 2px dashed var(--line);
+    border-radius: 6px;
+    padding: 14px;
+    margin-bottom: 18px;
+    font-size: 17px;
+  }
+
   /* ---------- Notices ---------- */
   .notice {
     border: 2px solid var(--warn-line);
@@ -88,7 +177,8 @@
     font-size: 17px;
   }
 
-  .notice.error { border-color: #8a1f1f; background: #ffe3e3; }
+  .notice.error { border-color: var(--danger); background: #ffe3e3; }
+  .notice.success { border-color: var(--accent); background: #ddf3e4; }
   .notice p { margin: 0 0 8px; }
   .notice p:last-child { margin-bottom: 0; }
 
@@ -148,12 +238,49 @@
     vertical-align: middle;
   }
 
+  /* ---------- Manage players screen ---------- */
+  .panel {
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    padding: 14px;
+    margin-bottom: 24px;
+  }
+
+  .roster-group { margin-bottom: 24px; }
+
+  .roster-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    min-height: 56px;
+  }
+
+  .roster-name { flex: 1 1 180px; font-size: 18px; }
+
+  .roster-row .row-actions { display: flex; gap: 8px; flex: none; }
+
+  .roster-row .row-actions button {
+    width: auto;
+    min-width: 84px;
+    min-height: 44px;
+    font-size: 16px;
+    padding: 8px 12px;
+  }
+
   /* ---------- Wider screens (iPad landscape ~1024px) ---------- */
   @media (min-width: 700px) {
     body { padding: 24px 32px; max-width: 1100px; margin: 0 auto; }
     .number-fields { grid-template-columns: repeat(3, 1fr); }
-    button { width: auto; min-width: 260px; }
+    .tab-bar { justify-content: flex-start; }
+    .tab-button { flex: 0 0 auto; min-width: 220px; }
+    #generateButton { width: auto; min-width: 260px; }
     .court-grid { grid-template-columns: repeat(2, 1fr); }
+    .button-row button { flex: 0 0 auto; min-width: 160px; }
   }
 
   @media (min-width: 1000px) {
@@ -164,48 +291,105 @@
 <body>
 
 <h1>Pickleball Rotation Scheduler</h1>
-<p class="subtitle">Enter your players, choose your courts and rounds, and generate a rotation.</p>
 
-<div class="field">
-  <label for="playerNames">
-    Player names
-    <span class="hint">— one per line. Optionally end a name with M or F, e.g. "Sam F".</span>
-  </label>
-  <textarea id="playerNames" spellcheck="false">Alice F
-Ben M
-Cara F
-Dan M
-Eve F
-Femi M
-Gita F
-Hank M
-Iris F
-Jon M
-Kim F
-Luis M</textarea>
+<div class="tab-bar" role="tablist">
+  <button class="tab-button" id="tabSession" type="button" role="tab" aria-selected="true">Session</button>
+  <button class="tab-button" id="tabManage" type="button" role="tab" aria-selected="false">Manage players</button>
 </div>
 
-<div class="number-fields">
+
+<!-- ===================== SESSION SCREEN ===================== -->
+<div class="screen" id="sessionScreen">
+
+  <p class="subtitle">Pick tonight's section, untick anyone who didn't show up, then generate.</p>
+
   <div class="field">
-    <label for="numCourts">Number of courts</label>
-    <input type="number" id="numCourts" value="4" min="1" max="20">
+    <label for="sectionPicker">Section playing tonight</label>
+    <select id="sectionPicker"></select>
   </div>
+
   <div class="field">
-    <label for="numRounds">Number of rounds</label>
-    <input type="number" id="numRounds" value="5" min="1" max="30">
+    <label>Who's here <span class="hint">— everyone is ticked by default.</span></label>
+    <div class="button-row">
+      <button class="secondary" id="checkAllButton" type="button">All</button>
+      <button class="secondary" id="checkNoneButton" type="button">None</button>
+    </div>
+    <div id="attendanceList"></div>
+    <p id="attendanceCount" class="hint"></p>
   </div>
+
+  <div class="number-fields">
+    <div class="field">
+      <label for="numCourts">Number of courts</label>
+      <input type="number" id="numCourts" value="4" min="1" max="20">
+    </div>
+    <div class="field">
+      <label for="numRounds">Number of rounds</label>
+      <input type="number" id="numRounds" value="5" min="1" max="30">
+    </div>
+    <div class="field">
+      <label for="playersPerCourt">Players per court</label>
+      <input type="number" id="playersPerCourt" value="4" min="2" max="8">
+    </div>
+  </div>
+
   <div class="field">
-    <label for="playersPerCourt">Players per court</label>
-    <input type="number" id="playersPerCourt" value="4" min="2" max="8">
+    <button id="generateButton" type="button">Generate schedule</button>
   </div>
+
+  <div id="messages"></div>
+  <div id="results"></div>
 </div>
 
-<div class="field">
-  <button id="generateButton" type="button">Generate schedule</button>
+
+<!-- ===================== MANAGE PLAYERS SCREEN ===================== -->
+<div class="screen" id="manageScreen" hidden>
+
+  <p class="subtitle">Your roster is saved on this device. Each person is stored once, even if they play more than one night.</p>
+
+  <div class="panel">
+    <h2 id="playerFormTitle">Add a player</h2>
+
+    <div class="field">
+      <label for="playerNameInput">Name</label>
+      <input type="text" id="playerNameInput" autocomplete="off" spellcheck="false">
+    </div>
+
+    <div class="field">
+      <label>Gender</label>
+      <div class="check-list radio-row">
+        <label class="check-row"><input type="radio" name="playerGender" value="M"> M</label>
+        <label class="check-row"><input type="radio" name="playerGender" value="F"> F</label>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Sections <span class="hint">— tick every night they play.</span></label>
+      <div class="check-list" id="playerSectionChoices"></div>
+    </div>
+
+    <div id="playerFormMessage"></div>
+
+    <div class="button-row">
+      <button id="savePlayerButton" type="button">Save player</button>
+      <button class="secondary" id="cancelEditButton" type="button" hidden>Cancel</button>
+    </div>
+  </div>
+
+  <h2>Roster</h2>
+  <div id="rosterList"></div>
+
+  <h2>Backup</h2>
+  <p class="subtitle">Move your roster between devices with a file.</p>
+  <div class="button-row">
+    <button class="secondary" id="exportButton" type="button">Export</button>
+    <button class="secondary" id="importButton" type="button">Import</button>
+  </div>
+  <!-- Hidden: the visible Import button clicks this for us. -->
+  <input type="file" id="importFileInput" accept="application/json,.json" hidden>
+  <div id="backupMessage"></div>
 </div>
 
-<div id="messages"></div>
-<div id="results"></div>
 
 <script>
 /* =========================================================================
@@ -218,6 +402,9 @@ Luis M</textarea>
    constraints as hard rules, because for most player counts a perfect
    schedule is impossible. Instead the constraints become penalties, and
    we hunt for the schedule with the smallest total penalty.
+
+   Sections 2 to 6 are the generator. They know nothing about rosters or
+   storage — they just receive a list of players and do the maths.
    ========================================================================= */
 
 
@@ -233,39 +420,164 @@ const PENALTY_SAME_COURT_IN_A_ROW = 3;    // per player stuck on same court no.
 
 
 /* =========================================================================
-   SECTION 1 — READING THE INPUTS
+   SECTION 0 — SAVED DATA (localStorage)
+
+   Everything lives in one browser key as a single JSON object, so a backup
+   is just that object written to a file.
    ========================================================================= */
 
+const STORAGE_KEY = "pickleball-data";
+const DATA_VERSION = 1;
+
+/** The starting point for a brand new device: five sections, nobody in them. */
+function buildDefaultData() {
+  return {
+    version: DATA_VERSION,
+    sections: [
+      { id: "novice",   name: "Novice",                level: 1 },
+      { id: "nov-int",  name: "Novice/Intermediate",   level: 2 },
+      { id: "int",      name: "Intermediate",          level: 3 },
+      { id: "int-adv",  name: "Intermediate/Advanced", level: 4 },
+      { id: "advanced", name: "Advanced",              level: 5 }
+    ],
+    players: []
+  };
+}
+
 /**
- * Turns the textarea contents into a list of player objects.
- * A trailing " M" or " F" (any case) is treated as gender and stored.
- * Gender is deliberately not used by the algorithm yet.
+ * Rebuilds a data object field by field, keeping only what we recognise.
+ *
+ * We do this on every load and on every import. It means a truncated,
+ * hand-edited, or hostile file can never put junk into the rest of the app —
+ * anything unexpected is simply dropped.
  */
-function parsePlayers(rawText) {
-  const lines = rawText.split("\n");
-  const players = [];
+function cleanUpData(rawData) {
+  const safeData = buildDefaultData();
+  if (!rawData || typeof rawData !== "object") return safeData;
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed === "") continue; // skip blank lines
-
-    // Look for a name that ends with a space then a single M or F.
-    const genderMatch = trimmed.match(/^(.*\S)\s+([MFmf])$/);
-
-    if (genderMatch) {
-      players.push({
-        index: players.length,
-        name: genderMatch[1],
-        gender: genderMatch[2].toUpperCase()
+  // --- Sections ---
+  if (Array.isArray(rawData.sections) && rawData.sections.length > 0) {
+    const cleanSections = [];
+    for (const section of rawData.sections) {
+      if (!section || typeof section.id !== "string" || typeof section.name !== "string") continue;
+      cleanSections.push({
+        id: section.id,
+        name: section.name,
+        level: Number.isFinite(section.level) ? section.level : cleanSections.length + 1
       });
-    } else {
-      players.push({
-        index: players.length,
-        name: trimmed,
-        gender: null
+    }
+    if (cleanSections.length > 0) safeData.sections = cleanSections;
+  }
+
+  // --- Players ---
+  const knownSectionIds = new Set(safeData.sections.map(function (s) { return s.id; }));
+  if (Array.isArray(rawData.players)) {
+    const usedIds = new Set();
+    for (const player of rawData.players) {
+      if (!player || typeof player.name !== "string" || player.name.trim() === "") continue;
+
+      // Keep the stored id when it is usable, otherwise mint a fresh one.
+      let id = typeof player.id === "string" && player.id !== "" ? player.id : "";
+      if (id === "" || usedIds.has(id)) id = "p" + (usedIds.size + 1) + "-" + Date.now();
+      usedIds.add(id);
+
+      // Drop section ids that no longer exist, so nobody points at nothing.
+      const sections = Array.isArray(player.sections)
+        ? player.sections.filter(function (sectionId) { return knownSectionIds.has(sectionId); })
+        : [];
+
+      safeData.players.push({
+        id: id,
+        name: player.name.trim(),
+        gender: player.gender === "M" || player.gender === "F" ? player.gender : null,
+        sections: sections
       });
     }
   }
+
+  return safeData;
+}
+
+/** Reads saved data, falling back to defaults if nothing is saved or it is unreadable. */
+function loadData() {
+  try {
+    const savedText = localStorage.getItem(STORAGE_KEY);
+    if (!savedText) return buildDefaultData();
+    return cleanUpData(JSON.parse(savedText));
+  } catch (error) {
+    // Corrupt JSON, or storage blocked entirely. Carry on with an empty roster.
+    return buildDefaultData();
+  }
+}
+
+/** Writes the whole data object back. Returns false if the browser refused. */
+function saveData() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(appData));
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+// The single in-memory copy of everything. Screens read from this.
+let appData = loadData();
+
+/** Finds a section by its id. */
+function findSection(sectionId) {
+  return appData.sections.find(function (section) { return section.id === sectionId; }) || null;
+}
+
+/** Finds a player by their id. */
+function findPlayer(playerId) {
+  return appData.players.find(function (player) { return player.id === playerId; }) || null;
+}
+
+/** Everyone in a given section, sorted by name so the list is easy to scan. */
+function getPlayersInSection(sectionId) {
+  return appData.players
+    .filter(function (player) { return player.sections.indexOf(sectionId) !== -1; })
+    .sort(function (a, b) { return a.name.localeCompare(b.name); });
+}
+
+/** Makes an id that is not already taken, e.g. "p7". */
+function makeNewPlayerId() {
+  let counter = appData.players.length + 1;
+  while (findPlayer("p" + counter) !== null) counter++;
+  return "p" + counter;
+}
+
+
+/* =========================================================================
+   SECTION 1 — READING THE INPUTS
+
+   This is the only place that decides WHO is playing. It used to read a
+   textarea; it now reads the ticked boxes on the session screen. Either
+   way it hands the generator the same thing: a plain list of players.
+   ========================================================================= */
+
+/**
+ * Collects the ticked players and puts them in the shape the generator wants.
+ *
+ * The important bit is `index`. The scoring code uses it to look players up
+ * in arrays and to build pair keys, so it must run 0, 1, 2... with no gaps —
+ * it is a position in tonight's list, NOT the player's saved id.
+ */
+function getSelectedPlayers() {
+  const tickedBoxes = document.querySelectorAll("#attendanceList input[type='checkbox']:checked");
+  const players = [];
+
+  tickedBoxes.forEach(function (box) {
+    const savedPlayer = findPlayer(box.value);
+    if (savedPlayer === null) return;
+
+    players.push({
+      index: players.length,        // position in tonight's list
+      id: savedPlayer.id,           // carried along, unused by the generator
+      name: savedPlayer.name,
+      gender: savedPlayer.gender    // stored, deliberately not used yet
+    });
+  });
 
   return players;
 }
@@ -562,7 +874,7 @@ function checkFeasibility(playerCount, roundCount, playersPerCourt) {
 
 
 /* =========================================================================
-   SECTION 7 — PUTTING IT ON THE SCREEN
+   SECTION 7 — PUTTING THE SCHEDULE ON THE SCREEN
    ========================================================================= */
 
 const messagesElement = document.getElementById("messages");
@@ -576,15 +888,25 @@ function createElement(tagName, className, textContent) {
   return element;
 }
 
+/** Removes every child of an element. */
+function emptyElement(element) {
+  element.textContent = "";
+}
+
 function clearScreen() {
-  messagesElement.textContent = "";
-  resultsElement.textContent = "";
+  emptyElement(messagesElement);
+  emptyElement(resultsElement);
+}
+
+/** Puts a coloured message box inside the given container. */
+function showNotice(container, message, kind) {
+  const box = createElement("div", kind ? "notice " + kind : "notice");
+  box.appendChild(createElement("p", null, message));
+  container.appendChild(box);
 }
 
 function showError(message) {
-  const box = createElement("div", "notice error");
-  box.appendChild(createElement("p", null, message));
-  messagesElement.appendChild(box);
+  showNotice(messagesElement, message, "error");
 }
 
 /** Joins player names with "&", e.g. "Alice & Ben". */
@@ -696,13 +1018,84 @@ function renderSchedule(schedule) {
 
 
 /* =========================================================================
-   SECTION 8 — WIRING IT ALL TOGETHER
+   SECTION 8 — THE SESSION SCREEN
    ========================================================================= */
+
+const sectionPicker = document.getElementById("sectionPicker");
+const attendanceList = document.getElementById("attendanceList");
+const attendanceCount = document.getElementById("attendanceCount");
+
+/** Fills the section dropdown, keeping the current choice if it still exists. */
+function renderSectionPicker() {
+  const previousChoice = sectionPicker.value;
+  emptyElement(sectionPicker);
+
+  for (const section of appData.sections) {
+    const option = document.createElement("option");
+    option.value = section.id;
+    option.textContent = section.name;
+    sectionPicker.appendChild(option);
+  }
+
+  if (previousChoice && findSection(previousChoice) !== null) {
+    sectionPicker.value = previousChoice;
+  }
+}
+
+/** Updates the little "8 of 12 ticked" line under the list. */
+function updateAttendanceCount() {
+  const total = attendanceList.querySelectorAll("input[type='checkbox']").length;
+  const ticked = attendanceList.querySelectorAll("input[type='checkbox']:checked").length;
+  attendanceCount.textContent = total === 0 ? "" : ticked + " of " + total + " playing";
+}
+
+/** Draws the tick list for whichever section is chosen. Everyone starts ticked. */
+function renderAttendanceList() {
+  emptyElement(attendanceList);
+
+  const players = getPlayersInSection(sectionPicker.value);
+
+  if (players.length === 0) {
+    const note = createElement("div", "empty-note",
+      "Nobody is in this section yet. Use the \"Manage players\" tab to add people.");
+    attendanceList.appendChild(note);
+    updateAttendanceCount();
+    return;
+  }
+
+  const list = createElement("div", "check-list");
+
+  for (const player of players) {
+    // The <label> wraps the box, so tapping anywhere on the row toggles it.
+    const row = createElement("label", "check-row");
+
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = player.id;
+    box.checked = true; // default: assume everyone showed up
+    box.addEventListener("change", updateAttendanceCount);
+
+    row.appendChild(box);
+    row.appendChild(createElement("span", null, player.name));
+    list.appendChild(row);
+  }
+
+  attendanceList.appendChild(list);
+  updateAttendanceCount();
+}
+
+/** Ticks or unticks every box at once. */
+function setAllAttendance(shouldBeChecked) {
+  attendanceList.querySelectorAll("input[type='checkbox']").forEach(function (box) {
+    box.checked = shouldBeChecked;
+  });
+  updateAttendanceCount();
+}
 
 function handleGenerateClick() {
   clearScreen();
 
-  const players = parsePlayers(document.getElementById("playerNames").value);
+  const players = getSelectedPlayers();
   const courtCount = readNumberInput("numCourts", 4);
   const roundCount = readNumberInput("numRounds", 5);
   const playersPerCourt = readNumberInput("playersPerCourt", 4);
@@ -713,7 +1106,7 @@ function handleGenerateClick() {
     return;
   }
   if (players.length < playersPerCourt) {
-    showError("You have " + players.length + " player(s) but need at least " +
+    showError("You have " + players.length + " player(s) ticked but need at least " +
               playersPerCourt + " to fill a single court.");
     return;
   }
@@ -734,7 +1127,404 @@ function handleGenerateClick() {
   renderSchedule(result.schedule);
 }
 
+sectionPicker.addEventListener("change", function () {
+  renderAttendanceList();
+  clearScreen(); // an old schedule for a different section would be confusing
+});
+document.getElementById("checkAllButton").addEventListener("click", function () {
+  setAllAttendance(true);
+});
+document.getElementById("checkNoneButton").addEventListener("click", function () {
+  setAllAttendance(false);
+});
 document.getElementById("generateButton").addEventListener("click", handleGenerateClick);
+
+
+/* =========================================================================
+   SECTION 9 — THE MANAGE PLAYERS SCREEN
+   ========================================================================= */
+
+const playerNameInput = document.getElementById("playerNameInput");
+const playerSectionChoices = document.getElementById("playerSectionChoices");
+const playerFormTitle = document.getElementById("playerFormTitle");
+const playerFormMessage = document.getElementById("playerFormMessage");
+const cancelEditButton = document.getElementById("cancelEditButton");
+const rosterList = document.getElementById("rosterList");
+
+// Which player the form is currently editing. null means "adding a new one".
+let editingPlayerId = null;
+
+/** Draws the section tick boxes inside the add/edit form. */
+function renderPlayerSectionChoices() {
+  emptyElement(playerSectionChoices);
+
+  for (const section of appData.sections) {
+    const row = createElement("label", "check-row");
+
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = section.id;
+
+    row.appendChild(box);
+    row.appendChild(createElement("span", null, section.name));
+    playerSectionChoices.appendChild(row);
+  }
+}
+
+/** Reads the gender radio buttons. Returns "M", "F", or null if neither is picked. */
+function readChosenGender() {
+  const chosen = document.querySelector("input[name='playerGender']:checked");
+  return chosen ? chosen.value : null;
+}
+
+/** Reads the ticked section boxes in the form. */
+function readChosenSections() {
+  const ticked = playerSectionChoices.querySelectorAll("input[type='checkbox']:checked");
+  return Array.from(ticked).map(function (box) { return box.value; });
+}
+
+/** Puts the form back to "Add a player" with everything blank. */
+function resetPlayerForm() {
+  editingPlayerId = null;
+  playerFormTitle.textContent = "Add a player";
+  playerNameInput.value = "";
+
+  document.querySelectorAll("input[name='playerGender']").forEach(function (radio) {
+    radio.checked = false;
+  });
+  playerSectionChoices.querySelectorAll("input[type='checkbox']").forEach(function (box) {
+    box.checked = false;
+  });
+
+  emptyElement(playerFormMessage);
+  cancelEditButton.hidden = true;
+}
+
+/** Loads an existing player into the form so it can be changed. */
+function startEditingPlayer(playerId) {
+  const player = findPlayer(playerId);
+  if (player === null) return;
+
+  editingPlayerId = playerId;
+  playerFormTitle.textContent = "Edit " + player.name;
+  playerNameInput.value = player.name;
+
+  document.querySelectorAll("input[name='playerGender']").forEach(function (radio) {
+    radio.checked = radio.value === player.gender;
+  });
+  playerSectionChoices.querySelectorAll("input[type='checkbox']").forEach(function (box) {
+    box.checked = player.sections.indexOf(box.value) !== -1;
+  });
+
+  emptyElement(playerFormMessage);
+  cancelEditButton.hidden = false;
+  playerFormTitle.scrollIntoView({ block: "start" });
+}
+
+/** Handles Save for both adding and editing. */
+function handleSavePlayerClick() {
+  emptyElement(playerFormMessage);
+
+  const name = playerNameInput.value.trim();
+  const gender = readChosenGender();
+  const sections = readChosenSections();
+
+  if (name === "") {
+    showNotice(playerFormMessage, "Please enter a name.", "error");
+    return;
+  }
+  if (gender === null) {
+    showNotice(playerFormMessage, "Please choose M or F.", "error");
+    return;
+  }
+
+  // Warn about a duplicate name, but let it through — two people really can
+  // share a name. We compare case-insensitively and ignore the person being
+  // edited, so re-saving someone unchanged never warns.
+  const clashingPlayer = appData.players.find(function (player) {
+    return player.id !== editingPlayerId &&
+           player.name.toLowerCase() === name.toLowerCase();
+  });
+
+  if (editingPlayerId === null) {
+    appData.players.push({
+      id: makeNewPlayerId(),
+      name: name,
+      gender: gender,
+      sections: sections
+    });
+  } else {
+    const player = findPlayer(editingPlayerId);
+    player.name = name;
+    player.gender = gender;
+    player.sections = sections;
+  }
+
+  const wasEditing = editingPlayerId !== null;
+  const savedOk = saveData();
+  resetPlayerForm();
+  renderRoster();
+  renderAttendanceList();
+
+  if (!savedOk) {
+    showNotice(playerFormMessage,
+      "Saved for now, but this browser refused to store it — your roster may " +
+      "not survive a refresh. Private browsing often causes this.", "error");
+  } else if (clashingPlayer) {
+    showNotice(playerFormMessage,
+      "Saved. Note there is already someone called " + name + " on your roster.", "");
+  } else {
+    showNotice(playerFormMessage,
+      (wasEditing ? "Updated " : "Added ") + name + ".", "success");
+  }
+}
+
+/** Deletes a player after asking first. */
+function handleDeletePlayerClick(playerId) {
+  const player = findPlayer(playerId);
+  if (player === null) return;
+
+  const confirmed = window.confirm("Remove " + player.name + " from your roster?");
+  if (!confirmed) return;
+
+  appData.players = appData.players.filter(function (other) { return other.id !== playerId; });
+  saveData();
+
+  // If we were editing that person, the form is now pointing at nothing.
+  if (editingPlayerId === playerId) resetPlayerForm();
+
+  renderRoster();
+  renderAttendanceList();
+}
+
+/** Builds one row in the roster list: name, gender, edit and delete. */
+function renderRosterRow(player) {
+  const row = createElement("div", "roster-row");
+
+  const nameCell = createElement("span", "roster-name", player.name);
+  if (player.gender) {
+    nameCell.appendChild(createElement("span", "tag", player.gender));
+  }
+  row.appendChild(nameCell);
+
+  const actions = createElement("div", "row-actions");
+
+  const editButton = createElement("button", "secondary", "Edit");
+  editButton.type = "button";
+  editButton.addEventListener("click", function () { startEditingPlayer(player.id); });
+
+  const deleteButton = createElement("button", "danger", "Delete");
+  deleteButton.type = "button";
+  deleteButton.addEventListener("click", function () { handleDeletePlayerClick(player.id); });
+
+  actions.appendChild(editButton);
+  actions.appendChild(deleteButton);
+  row.appendChild(actions);
+
+  return row;
+}
+
+/**
+ * Draws the whole roster, grouped by section.
+ *
+ * Someone in two sections appears under both headings — that is one person
+ * shown twice, not two records. Editing either row edits the same player.
+ */
+function renderRoster() {
+  emptyElement(rosterList);
+
+  if (appData.players.length === 0) {
+    rosterList.appendChild(createElement("div", "empty-note",
+      "No players yet. Add your first one using the form above."));
+    return;
+  }
+
+  for (const section of appData.sections) {
+    const players = getPlayersInSection(section.id);
+
+    const group = createElement("div", "roster-group");
+    group.appendChild(createElement("h3", null,
+      section.name + " (" + players.length + ")"));
+
+    if (players.length === 0) {
+      group.appendChild(createElement("p", "hint", "Nobody in this section yet."));
+    } else {
+      for (const player of players) {
+        group.appendChild(renderRosterRow(player));
+      }
+    }
+
+    rosterList.appendChild(group);
+  }
+
+  // Anyone with no sections would otherwise be invisible and unreachable.
+  const unassigned = appData.players
+    .filter(function (player) { return player.sections.length === 0; })
+    .sort(function (a, b) { return a.name.localeCompare(b.name); });
+
+  if (unassigned.length > 0) {
+    const group = createElement("div", "roster-group");
+    group.appendChild(createElement("h3", null, "No section yet (" + unassigned.length + ")"));
+    group.appendChild(createElement("p", "hint",
+      "These players won't appear on the session screen until they are put in a section."));
+    for (const player of unassigned) {
+      group.appendChild(renderRosterRow(player));
+    }
+    rosterList.appendChild(group);
+  }
+}
+
+document.getElementById("savePlayerButton").addEventListener("click", handleSavePlayerClick);
+cancelEditButton.addEventListener("click", resetPlayerForm);
+
+
+/* =========================================================================
+   SECTION 10 — BACKUP: EXPORT AND IMPORT
+
+   Export writes the data object to a .json file; import reads one back.
+   That file is how the roster moves between the laptop and the iPad.
+   ========================================================================= */
+
+const backupMessage = document.getElementById("backupMessage");
+const importFileInput = document.getElementById("importFileInput");
+
+/** Today's date as YYYY-MM-DD, for the filename. */
+function todayAsText() {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return now.getFullYear() + "-" + month + "-" + day;
+}
+
+/**
+ * Downloads the data as a file.
+ *
+ * We make a temporary in-memory file (a Blob), point an invisible link at
+ * it, click that link, then throw it away. No server is involved, so this
+ * works with no internet connection.
+ */
+function handleExportClick() {
+  emptyElement(backupMessage);
+
+  const fileText = JSON.stringify(appData, null, 2);
+  const blob = new Blob([fileText], { type: "application/json" });
+  const temporaryUrl = URL.createObjectURL(blob);
+
+  const link = document.createElement("a");
+  link.href = temporaryUrl;
+  link.download = "pickleball-roster-" + todayAsText() + ".json";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(temporaryUrl);
+
+  showNotice(backupMessage,
+    "Exported " + appData.players.length + " player(s). Copy that file to your " +
+    "other device, then use Import there.", "success");
+}
+
+/** Reads the chosen file and replaces everything, after confirming. */
+function handleImportFileChosen(event) {
+  emptyElement(backupMessage);
+
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+
+  reader.onload = function () {
+    let incomingData;
+    try {
+      incomingData = cleanUpData(JSON.parse(reader.result));
+    } catch (error) {
+      showNotice(backupMessage,
+        "That file isn't readable as a backup. Make sure it's a .json file " +
+        "exported from this app.", "error");
+      importFileInput.value = "";
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Import " + incomingData.players.length + " player(s) and " +
+      incomingData.sections.length + " section(s)?\n\n" +
+      "This REPLACES your current roster of " + appData.players.length +
+      " player(s) on this device. It cannot be undone."
+    );
+
+    if (!confirmed) {
+      showNotice(backupMessage, "Import cancelled — nothing changed.", "");
+      importFileInput.value = "";
+      return;
+    }
+
+    appData = incomingData;
+    saveData();
+
+    // Every screen is now showing stale data, so redraw them all.
+    resetPlayerForm();
+    renderPlayerSectionChoices();
+    renderRoster();
+    renderSectionPicker();
+    renderAttendanceList();
+    clearScreen();
+
+    showNotice(backupMessage,
+      "Imported " + appData.players.length + " player(s).", "success");
+
+    // Let the same file be picked again later.
+    importFileInput.value = "";
+  };
+
+  reader.onerror = function () {
+    showNotice(backupMessage, "Could not read that file.", "error");
+    importFileInput.value = "";
+  };
+
+  reader.readAsText(file);
+}
+
+document.getElementById("exportButton").addEventListener("click", handleExportClick);
+document.getElementById("importButton").addEventListener("click", function () {
+  importFileInput.click(); // the real file input is hidden
+});
+importFileInput.addEventListener("change", handleImportFileChosen);
+
+
+/* =========================================================================
+   SECTION 11 — SWITCHING SCREENS, AND STARTING UP
+   ========================================================================= */
+
+const sessionScreen = document.getElementById("sessionScreen");
+const manageScreen = document.getElementById("manageScreen");
+const tabSession = document.getElementById("tabSession");
+const tabManage = document.getElementById("tabManage");
+
+function showScreen(screenName) {
+  const showingSession = screenName === "session";
+
+  sessionScreen.hidden = !showingSession;
+  manageScreen.hidden = showingSession;
+
+  tabSession.setAttribute("aria-selected", String(showingSession));
+  tabManage.setAttribute("aria-selected", String(!showingSession));
+}
+
+tabSession.addEventListener("click", function () {
+  // Coming back from Manage, the roster may have changed underneath us.
+  renderAttendanceList();
+  showScreen("session");
+});
+
+tabManage.addEventListener("click", function () {
+  showScreen("manage");
+});
+
+// --- First draw ---
+renderSectionPicker();
+renderAttendanceList();
+renderPlayerSectionChoices();
+renderRoster();
+showScreen("session");
 </script>
 
 </body>
