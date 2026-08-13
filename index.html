@@ -167,6 +167,55 @@
     font-size: 17px;
   }
 
+  /* ---------- Collapsible drawers (<details>) ---------- */
+  .drawer {
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    margin-bottom: 18px;
+  }
+
+  /* The whole header row is the tap target, hence the generous padding. */
+  .drawer > summary {
+    min-height: 52px;
+    padding: 14px 12px;
+    font-size: 18px;
+    font-weight: 700;
+    cursor: pointer;
+    list-style: none;
+    display: block;
+  }
+
+  .drawer > summary::-webkit-details-marker { display: none; }
+
+  /* A plain +/- marker, so state is readable without relying on colour. */
+  .drawer > summary::before {
+    content: "+";
+    display: inline-block;
+    width: 22px;
+    font-weight: 700;
+  }
+
+  .drawer[open] > summary::before { content: "\2212"; }
+
+  .drawer[open] > summary { border-bottom: 2px solid var(--line); }
+
+  .drawer-body { padding: 14px 12px; }
+
+  .drawer-body .hint { display: block; margin: 0 0 14px; }
+
+  /* Long lists of other-section players shouldn't push the form off screen. */
+  .scroll-list { max-height: 340px; overflow-y: auto; }
+
+  /* ---------- Search / filter row ---------- */
+  .filter-fields { display: grid; grid-template-columns: 1fr; gap: 14px; }
+  .filter-fields .field { margin-bottom: 0; }
+
+  .section-label {
+    font-size: 15px;
+    color: #333;
+    display: block;
+  }
+
   /* ---------- Notices ---------- */
   .notice {
     border: 2px solid var(--warn-line);
@@ -264,6 +313,9 @@
 
   .roster-row .row-actions { display: flex; gap: 8px; flex: none; }
 
+  /* Guest rows put a tick box inside a roster row; drop the inner divider. */
+  .roster-row .check-row { flex: 1 1 auto; border-bottom: none; min-height: 44px; }
+
   .roster-row .row-actions button {
     width: auto;
     min-width: 84px;
@@ -281,6 +333,7 @@
     #generateButton { width: auto; min-width: 260px; }
     .court-grid { grid-template-columns: repeat(2, 1fr); }
     .button-row button { flex: 0 0 auto; min-width: 160px; }
+    .filter-fields { grid-template-columns: 2fr 1fr; }
   }
 
   @media (min-width: 1000px) {
@@ -317,6 +370,50 @@
     <div id="attendanceList"></div>
     <p id="attendanceCount" class="hint"></p>
   </div>
+
+  <!-- Collapsed by default: most nights you won't need either of these. -->
+  <details class="drawer">
+    <summary>Add someone from another section</summary>
+    <div class="drawer-body">
+      <p class="hint">Tonight only — this does not change anyone's saved sections.</p>
+
+      <div class="field">
+        <label for="otherSectionSearch">Search</label>
+        <input type="text" id="otherSectionSearch" autocomplete="off" spellcheck="false"
+               placeholder="Type a name">
+      </div>
+
+      <div id="otherSectionList"></div>
+    </div>
+  </details>
+
+  <details class="drawer">
+    <summary>Add a guest</summary>
+    <div class="drawer-body">
+      <p class="hint">Walk-ins. Not saved to your roster — they disappear when you reload.</p>
+
+      <div class="field">
+        <label for="guestNameInput">Name</label>
+        <input type="text" id="guestNameInput" autocomplete="off" spellcheck="false">
+      </div>
+
+      <div class="field">
+        <label>Gender</label>
+        <div class="check-list radio-row">
+          <label class="check-row"><input type="radio" name="guestGender" value="M"> M</label>
+          <label class="check-row"><input type="radio" name="guestGender" value="F"> F</label>
+        </div>
+      </div>
+
+      <div id="guestFormMessage"></div>
+
+      <div class="button-row">
+        <button class="secondary" id="addGuestButton" type="button">Add guest</button>
+      </div>
+
+      <div id="guestList"></div>
+    </div>
+  </details>
 
   <div class="number-fields">
     <div class="field">
@@ -377,6 +474,20 @@
   </div>
 
   <h2>Roster</h2>
+
+  <div class="filter-fields">
+    <div class="field">
+      <label for="rosterSearch">Search</label>
+      <input type="text" id="rosterSearch" autocomplete="off" spellcheck="false"
+             placeholder="Type any part of a name">
+    </div>
+    <div class="field">
+      <label for="rosterSectionFilter">Section</label>
+      <select id="rosterSectionFilter"></select>
+    </div>
+  </div>
+  <p id="rosterCount" class="hint"></p>
+
   <div id="rosterList"></div>
 
   <h2>Backup</h2>
@@ -557,27 +668,66 @@ function makeNewPlayerId() {
    ========================================================================= */
 
 /**
+ * TONIGHT'S EXTRAS — deliberately not saved anywhere.
+ *
+ * `borrowedPlayerIds` are people from other sections playing just for tonight.
+ * `guests` are walk-ins who are not on the roster at all.
+ *
+ * Both live in memory only. Nothing here is ever written to localStorage, so
+ * a borrowed player's saved sections are untouched and guests vanish on
+ * reload — which is exactly what we want for a one-off evening.
+ */
+let borrowedPlayerIds = new Set();
+let guests = [];
+let nextGuestNumber = 1;
+
+/**
  * Collects the ticked players and puts them in the shape the generator wants.
  *
  * The important bit is `index`. The scoring code uses it to look players up
  * in arrays and to build pair keys, so it must run 0, 1, 2... with no gaps —
  * it is a position in tonight's list, NOT the player's saved id.
+ *
+ * Three sources feed in: tonight's section, borrowed players, and guests.
+ * We read borrowed and guest ticks from memory rather than from the DOM,
+ * because the search box hides rows and a hidden row must still count.
  */
 function getSelectedPlayers() {
-  const tickedBoxes = document.querySelectorAll("#attendanceList input[type='checkbox']:checked");
   const players = [];
+  const alreadyAdded = new Set();
 
-  tickedBoxes.forEach(function (box) {
-    const savedPlayer = findPlayer(box.value);
-    if (savedPlayer === null) return;
-
+  function addPlayer(id, name, gender) {
+    if (alreadyAdded.has(id)) return; // never let one person play twice
+    alreadyAdded.add(id);
     players.push({
-      index: players.length,        // position in tonight's list
-      id: savedPlayer.id,           // carried along, unused by the generator
-      name: savedPlayer.name,
-      gender: savedPlayer.gender    // stored, deliberately not used yet
+      index: players.length,   // position in tonight's list
+      id: id,                  // carried along, unused by the generator
+      name: name,
+      gender: gender           // stored, deliberately not used yet
     });
+  }
+
+  // 1. Ticked players from tonight's section.
+  document.querySelectorAll("#attendanceList input[type='checkbox']:checked")
+    .forEach(function (box) {
+      const savedPlayer = findPlayer(box.value);
+      if (savedPlayer !== null) {
+        addPlayer(savedPlayer.id, savedPlayer.name, savedPlayer.gender);
+      }
+    });
+
+  // 2. Players borrowed from other sections.
+  borrowedPlayerIds.forEach(function (playerId) {
+    const savedPlayer = findPlayer(playerId);
+    if (savedPlayer !== null) {
+      addPlayer(savedPlayer.id, savedPlayer.name, savedPlayer.gender);
+    }
   });
+
+  // 3. Guests, if still ticked.
+  for (const guest of guests) {
+    if (guest.playing) addPlayer(guest.id, guest.name, guest.gender);
+  }
 
   return players;
 }
@@ -600,29 +750,81 @@ function readNumberInput(elementId, fallbackValue) {
 /**
  * Decides how many courts run in a round and how many players sit out.
  *
- * Rules:
- *  - Fill as many full courts as possible (up to the number of courts).
- *  - If exactly 2 players are left over AND a court is still free,
- *    give them that court as a 1v1 singles game.
- *  - Anybody still left over sits out.
+ * We try every legal combination of doubles courts and singles courts and
+ * pick the best one, in this order of priority:
+ *   1. FEWEST people sitting out — nobody wants to sit if a court is free.
+ *   2. Then the MOST doubles courts — doubles is the point of the evening,
+ *      so we only fall back to singles when it saves someone a sit-out.
+ *
+ * Trying every combination is the honest way to do this. An earlier version
+ * dealt out full courts greedily and only made a singles court when exactly
+ * two players were spare, which sat three people out of seven when only one
+ * needed to sit. Checking all the options avoids that whole class of bug.
+ *
+ * Worked example, 7 players and 4 courts:
+ *   1 doubles + 1 singles = 6 seated, 1 sitting   <-- chosen
+ *   0 doubles + 3 singles = 6 seated, 1 sitting   (same sit-outs, fewer doubles)
+ *   1 doubles + 0 singles = 4 seated, 3 sitting   (worse)
  */
 function planRoundShape(playerCount, courtCount, playersPerCourt) {
+  // A "singles" court only means anything when a normal court holds more
+  // than 2 people. At 2-per-court the two are the same thing.
+  const singlesAreUseful = playersPerCourt > 2;
+
+  let best = null;
+
+  for (let doublesCourts = 0; doublesCourts <= courtCount; doublesCourts++) {
+    const maxSingles = singlesAreUseful ? courtCount - doublesCourts : 0;
+
+    for (let singlesCourts = 0; singlesCourts <= maxSingles; singlesCourts++) {
+      const seated = doublesCourts * playersPerCourt + singlesCourts * 2;
+      if (seated > playerCount) continue; // can't seat more people than we have
+
+      const sitOutCount = playerCount - seated;
+
+      const isBetter = best === null ||
+        sitOutCount < best.sitOutCount ||
+        (sitOutCount === best.sitOutCount && doublesCourts > best.doublesCourts);
+
+      if (isBetter) {
+        best = {
+          doublesCourts: doublesCourts,
+          singlesCourts: singlesCourts,
+          sitOutCount: sitOutCount
+        };
+      }
+    }
+  }
+
+  // Build the actual court list: the big courts first, then any singles.
   const courtSizes = [];
-  let unplaced = playerCount;
+  for (let i = 0; i < best.doublesCourts; i++) courtSizes.push(playersPerCourt);
+  for (let i = 0; i < best.singlesCourts; i++) courtSizes.push(2);
 
-  // Deal out full courts while we have both players and courts to spare.
-  while (courtSizes.length < courtCount && unplaced >= playersPerCourt) {
-    courtSizes.push(playersPerCourt);
-    unplaced -= playersPerCourt;
+  return {
+    courtSizes: courtSizes,
+    sitOutCount: best.sitOutCount,
+    doublesCourts: best.doublesCourts,
+    singlesCourts: best.singlesCourts
+  };
+}
+
+/** Turns the round shape into a line like "2 doubles, 1 singles, 1 sitting". */
+function describeLayout(roundShape, playersPerCourt) {
+  const parts = [];
+
+  if (roundShape.doublesCourts > 0) {
+    // "Doubles" is only the right word when a court holds four.
+    parts.push(playersPerCourt === 4
+      ? roundShape.doublesCourts + " doubles"
+      : roundShape.doublesCourts + " courts of " + playersPerCourt);
   }
-
-  // Exactly two spare players get a singles court, if one is free.
-  if (unplaced === 2 && courtSizes.length < courtCount) {
-    courtSizes.push(2);
-    unplaced = 0;
+  if (roundShape.singlesCourts > 0) {
+    parts.push(roundShape.singlesCourts + " singles");
   }
+  parts.push(roundShape.sitOutCount + " sitting");
 
-  return { courtSizes: courtSizes, sitOutCount: unplaced };
+  return parts.join(", ");
 }
 
 
@@ -940,11 +1142,12 @@ function renderFeasibilityNotice(feasibility, playerCount, roundCount) {
 }
 
 /** The summary panel: score, timing, and the repeats we actually ended up with. */
-function renderStats(result) {
+function renderStats(result, layoutText) {
   const report = result.report;
   const box = createElement("div", "stats");
 
   box.appendChild(createElement("h3", null, "Result"));
+  box.appendChild(createElement("p", null, "Layout each round: " + layoutText + "."));
   box.appendChild(createElement("p", null,
     "Best score: " + report.score + " (lower is better) — found by trying " +
     result.attemptsRun.toLocaleString() + " random schedules in " +
@@ -1042,11 +1245,36 @@ function renderSectionPicker() {
   }
 }
 
-/** Updates the little "8 of 12 ticked" line under the list. */
+/**
+ * Updates the running "who's playing" line under the list.
+ * It counts everyone heading onto a court, including borrowed players
+ * and guests, so the number always matches what Generate will use.
+ */
 function updateAttendanceCount() {
   const total = attendanceList.querySelectorAll("input[type='checkbox']").length;
   const ticked = attendanceList.querySelectorAll("input[type='checkbox']:checked").length;
-  attendanceCount.textContent = total === 0 ? "" : ticked + " of " + total + " playing";
+
+  // Someone borrowed may also be in tonight's section if the roster changed
+  // under us, so count the deduplicated list rather than adding numbers up.
+  const playingNow = getSelectedPlayers().length;
+
+  const extras = [];
+  const borrowedCount = playingNow - ticked - guests.filter(function (g) { return g.playing; }).length;
+  if (borrowedCount > 0) extras.push(borrowedCount + " from other sections");
+
+  const guestCount = guests.filter(function (g) { return g.playing; }).length;
+  if (guestCount > 0) extras.push(guestCount + " guest" + (guestCount === 1 ? "" : "s"));
+
+  if (total === 0 && playingNow === 0) {
+    attendanceCount.textContent = "";
+    return;
+  }
+
+  let line = ticked + " of " + total + " in this section";
+  if (extras.length > 0) line += ", plus " + extras.join(" and ");
+  line += " \u2014 " + playingNow + " playing";
+
+  attendanceCount.textContent = line;
 }
 
 /** Draws the tick list for whichever section is chosen. Everyone starts ticked. */
@@ -1092,6 +1320,174 @@ function setAllAttendance(shouldBeChecked) {
   updateAttendanceCount();
 }
 
+
+/* ---------- Borrowing players from other sections (tonight only) ---------- */
+
+const otherSectionSearch = document.getElementById("otherSectionSearch");
+const otherSectionList = document.getElementById("otherSectionList");
+
+/** Names a player's sections for display, e.g. "Novice, Advanced". */
+function describePlayerSections(player) {
+  if (player.sections.length === 0) return "No section";
+
+  return player.sections
+    .map(function (sectionId) {
+      const section = findSection(sectionId);
+      return section === null ? sectionId : section.name;
+    })
+    .join(", ");
+}
+
+/**
+ * Draws the list of players who are NOT in tonight's section.
+ *
+ * Ticks come from `borrowedPlayerIds`, not from whatever is on screen, so
+ * filtering the list with the search box never loses a selection.
+ */
+function renderOtherSectionList() {
+  emptyElement(otherSectionList);
+
+  const tonightsSectionId = sectionPicker.value;
+  const searchText = otherSectionSearch.value.trim().toLowerCase();
+
+  const outsiders = appData.players
+    .filter(function (player) { return player.sections.indexOf(tonightsSectionId) === -1; })
+    .sort(function (a, b) { return a.name.localeCompare(b.name); });
+
+  const matching = outsiders.filter(function (player) {
+    return searchText === "" || player.name.toLowerCase().indexOf(searchText) !== -1;
+  });
+
+  if (outsiders.length === 0) {
+    otherSectionList.appendChild(createElement("div", "empty-note",
+      appData.players.length === 0
+        ? "Your roster is empty. Add players on the \u201CManage players\u201D tab."
+        : "Everyone on your roster is already in this section."));
+    return;
+  }
+
+  if (matching.length === 0) {
+    otherSectionList.appendChild(createElement("div", "empty-note",
+      "No one outside this section matches \u201C" + otherSectionSearch.value.trim() + "\u201D."));
+    return;
+  }
+
+  const list = createElement("div", "check-list scroll-list");
+
+  for (const player of matching) {
+    const row = createElement("label", "check-row");
+
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = player.id;
+    box.checked = borrowedPlayerIds.has(player.id);
+
+    box.addEventListener("change", function () {
+      // Remember the choice in memory. The saved player record is not touched.
+      if (box.checked) {
+        borrowedPlayerIds.add(player.id);
+      } else {
+        borrowedPlayerIds.delete(player.id);
+      }
+      updateAttendanceCount();
+    });
+
+    const nameCell = createElement("span");
+    nameCell.appendChild(document.createTextNode(player.name));
+    nameCell.appendChild(createElement("span", "section-label", describePlayerSections(player)));
+
+    row.appendChild(box);
+    row.appendChild(nameCell);
+    list.appendChild(row);
+  }
+
+  otherSectionList.appendChild(list);
+}
+
+
+/* ---------- Guests (walk-ins, never saved) ---------- */
+
+const guestNameInput = document.getElementById("guestNameInput");
+const guestFormMessage = document.getElementById("guestFormMessage");
+const guestList = document.getElementById("guestList");
+
+/** Draws tonight's guests, each with a tick box and a Remove button. */
+function renderGuestList() {
+  emptyElement(guestList);
+  if (guests.length === 0) return;
+
+  const list = createElement("div");
+
+  for (const guest of guests) {
+    const row = createElement("div", "roster-row");
+
+    const label = createElement("label", "check-row");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = guest.playing;
+    box.addEventListener("change", function () {
+      guest.playing = box.checked;
+      updateAttendanceCount();
+    });
+
+    const nameCell = createElement("span");
+    nameCell.appendChild(document.createTextNode(guest.name));
+    if (guest.gender) nameCell.appendChild(createElement("span", "tag", guest.gender));
+    nameCell.appendChild(createElement("span", "section-label", "Guest"));
+
+    label.appendChild(box);
+    label.appendChild(nameCell);
+    row.appendChild(label);
+
+    const actions = createElement("div", "row-actions");
+    const removeButton = createElement("button", "secondary", "Remove");
+    removeButton.type = "button";
+    removeButton.addEventListener("click", function () {
+      guests = guests.filter(function (other) { return other.id !== guest.id; });
+      renderGuestList();
+      updateAttendanceCount();
+    });
+    actions.appendChild(removeButton);
+    row.appendChild(actions);
+
+    list.appendChild(row);
+  }
+
+  guestList.appendChild(list);
+}
+
+/** Adds a walk-in to tonight's list only. Nothing is written to storage. */
+function handleAddGuestClick() {
+  emptyElement(guestFormMessage);
+
+  const name = guestNameInput.value.trim();
+  const genderRadio = document.querySelector("input[name='guestGender']:checked");
+
+  if (name === "") {
+    showNotice(guestFormMessage, "Please enter a name.", "error");
+    return;
+  }
+  if (genderRadio === null) {
+    showNotice(guestFormMessage, "Please choose M or F.", "error");
+    return;
+  }
+
+  guests.push({
+    id: "guest-" + nextGuestNumber, // "guest-" prefix can never clash with "p1"
+    name: name,
+    gender: genderRadio.value,
+    playing: true
+  });
+  nextGuestNumber++;
+
+  guestNameInput.value = "";
+  genderRadio.checked = false;
+
+  renderGuestList();
+  updateAttendanceCount();
+  showNotice(guestFormMessage, "Added " + name + " for tonight.", "success");
+}
+
 function handleGenerateClick() {
   clearScreen();
 
@@ -1123,13 +1519,26 @@ function handleGenerateClick() {
 
   // --- Search, then show what we found ---
   const result = findBestSchedule(players, roundCount, roundShape);
-  renderStats(result);
+  renderStats(result, describeLayout(roundShape, playersPerCourt));
   renderSchedule(result.schedule);
 }
 
 sectionPicker.addEventListener("change", function () {
+  // Changing section means setting up a different evening, so borrowed
+  // players are cleared. Guests stay: a walk-in belongs to the night, not
+  // to a section.
+  borrowedPlayerIds = new Set();
   renderAttendanceList();
+  renderOtherSectionList();
   clearScreen(); // an old schedule for a different section would be confusing
+});
+
+otherSectionSearch.addEventListener("input", renderOtherSectionList);
+document.getElementById("addGuestButton").addEventListener("click", handleAddGuestClick);
+
+// Enter in the guest name box should add them, rather than doing nothing.
+guestNameInput.addEventListener("keydown", function (event) {
+  if (event.key === "Enter") handleAddGuestClick();
 });
 document.getElementById("checkAllButton").addEventListener("click", function () {
   setAllAttendance(true);
@@ -1150,6 +1559,9 @@ const playerFormTitle = document.getElementById("playerFormTitle");
 const playerFormMessage = document.getElementById("playerFormMessage");
 const cancelEditButton = document.getElementById("cancelEditButton");
 const rosterList = document.getElementById("rosterList");
+const rosterSearch = document.getElementById("rosterSearch");
+const rosterSectionFilter = document.getElementById("rosterSectionFilter");
+const rosterCount = document.getElementById("rosterCount");
 
 // Which player the form is currently editing. null means "adding a new one".
 let editingPlayerId = null;
@@ -1265,6 +1677,7 @@ function handleSavePlayerClick() {
   resetPlayerForm();
   renderRoster();
   renderAttendanceList();
+  renderOtherSectionList();
 
   if (!savedOk) {
     showNotice(playerFormMessage,
@@ -1293,8 +1706,12 @@ function handleDeletePlayerClick(playerId) {
   // If we were editing that person, the form is now pointing at nothing.
   if (editingPlayerId === playerId) resetPlayerForm();
 
+  // They may have been borrowed for tonight; that reference is now dead.
+  borrowedPlayerIds.delete(playerId);
+
   renderRoster();
   renderAttendanceList();
+  renderOtherSectionList();
 }
 
 /** Builds one row in the roster list: name, gender, edit and delete. */
@@ -1324,30 +1741,71 @@ function renderRosterRow(player) {
   return row;
 }
 
+/** Fills the "All sections" filter dropdown, keeping the current choice. */
+function renderRosterSectionFilter() {
+  const previousChoice = rosterSectionFilter.value;
+  emptyElement(rosterSectionFilter);
+
+  const allOption = document.createElement("option");
+  allOption.value = "all";
+  allOption.textContent = "All sections";
+  rosterSectionFilter.appendChild(allOption);
+
+  for (const section of appData.sections) {
+    const option = document.createElement("option");
+    option.value = section.id;
+    option.textContent = section.name;
+    rosterSectionFilter.appendChild(option);
+  }
+
+  const stillExists = previousChoice === "all" || findSection(previousChoice) !== null;
+  rosterSectionFilter.value = stillExists && previousChoice ? previousChoice : "all";
+}
+
+/** True if the player passes the search box (match anywhere, any case). */
+function playerMatchesSearch(player, searchText) {
+  return searchText === "" || player.name.toLowerCase().indexOf(searchText) !== -1;
+}
+
 /**
- * Draws the whole roster, grouped by section.
+ * Draws the roster, grouped by section, honouring the search and filter.
  *
  * Someone in two sections appears under both headings — that is one person
  * shown twice, not two records. Editing either row edits the same player.
+ * The "showing X of Y" count therefore counts PEOPLE, not rows, so it never
+ * exceeds the roster size.
  */
 function renderRoster() {
   emptyElement(rosterList);
 
   if (appData.players.length === 0) {
+    rosterCount.textContent = "";
     rosterList.appendChild(createElement("div", "empty-note",
       "No players yet. Add your first one using the form above."));
     return;
   }
 
+  const searchText = rosterSearch.value.trim().toLowerCase();
+  const chosenSection = rosterSectionFilter.value;
+  const matchingPeople = new Set();
+
   for (const section of appData.sections) {
-    const players = getPlayersInSection(section.id);
+    // Skip whole sections when the filter is pointed at a single one.
+    if (chosenSection !== "all" && chosenSection !== section.id) continue;
+
+    const players = getPlayersInSection(section.id).filter(function (player) {
+      return playerMatchesSearch(player, searchText);
+    });
+
+    players.forEach(function (player) { matchingPeople.add(player.id); });
 
     const group = createElement("div", "roster-group");
     group.appendChild(createElement("h3", null,
       section.name + " (" + players.length + ")"));
 
     if (players.length === 0) {
-      group.appendChild(createElement("p", "hint", "Nobody in this section yet."));
+      group.appendChild(createElement("p", "hint",
+        searchText === "" ? "Nobody in this section yet." : "No matches in this section."));
     } else {
       for (const player of players) {
         group.appendChild(renderRosterRow(player));
@@ -1358,24 +1816,40 @@ function renderRoster() {
   }
 
   // Anyone with no sections would otherwise be invisible and unreachable.
-  const unassigned = appData.players
-    .filter(function (player) { return player.sections.length === 0; })
-    .sort(function (a, b) { return a.name.localeCompare(b.name); });
+  if (chosenSection === "all") {
+    const unassigned = appData.players
+      .filter(function (player) {
+        return player.sections.length === 0 && playerMatchesSearch(player, searchText);
+      })
+      .sort(function (a, b) { return a.name.localeCompare(b.name); });
 
-  if (unassigned.length > 0) {
-    const group = createElement("div", "roster-group");
-    group.appendChild(createElement("h3", null, "No section yet (" + unassigned.length + ")"));
-    group.appendChild(createElement("p", "hint",
-      "These players won't appear on the session screen until they are put in a section."));
-    for (const player of unassigned) {
-      group.appendChild(renderRosterRow(player));
+    unassigned.forEach(function (player) { matchingPeople.add(player.id); });
+
+    if (unassigned.length > 0) {
+      const group = createElement("div", "roster-group");
+      group.appendChild(createElement("h3", null, "No section yet (" + unassigned.length + ")"));
+      group.appendChild(createElement("p", "hint",
+        "These players won't appear on the session screen until they are put in a section."));
+      for (const player of unassigned) {
+        group.appendChild(renderRosterRow(player));
+      }
+      rosterList.appendChild(group);
     }
-    rosterList.appendChild(group);
+  }
+
+  rosterCount.textContent =
+    "showing " + matchingPeople.size + " of " + appData.players.length;
+
+  if (matchingPeople.size === 0) {
+    rosterList.appendChild(createElement("div", "empty-note",
+      "No players match those filters."));
   }
 }
 
 document.getElementById("savePlayerButton").addEventListener("click", handleSavePlayerClick);
 cancelEditButton.addEventListener("click", resetPlayerForm);
+rosterSearch.addEventListener("input", renderRoster);
+rosterSectionFilter.addEventListener("change", renderRoster);
 
 
 /* =========================================================================
@@ -1460,12 +1934,17 @@ function handleImportFileChosen(event) {
     appData = incomingData;
     saveData();
 
+    // The old roster is gone, so anyone borrowed from it is meaningless now.
+    borrowedPlayerIds = new Set();
+
     // Every screen is now showing stale data, so redraw them all.
     resetPlayerForm();
     renderPlayerSectionChoices();
+    renderRosterSectionFilter();
     renderRoster();
     renderSectionPicker();
     renderAttendanceList();
+    renderOtherSectionList();
     clearScreen();
 
     showNotice(backupMessage,
@@ -1512,6 +1991,8 @@ function showScreen(screenName) {
 tabSession.addEventListener("click", function () {
   // Coming back from Manage, the roster may have changed underneath us.
   renderAttendanceList();
+  renderOtherSectionList();
+  renderGuestList();
   showScreen("session");
 });
 
@@ -1522,7 +2003,10 @@ tabManage.addEventListener("click", function () {
 // --- First draw ---
 renderSectionPicker();
 renderAttendanceList();
+renderOtherSectionList();
+renderGuestList();
 renderPlayerSectionChoices();
+renderRosterSectionFilter();
 renderRoster();
 showScreen("session");
 </script>
