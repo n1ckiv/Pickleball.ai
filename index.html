@@ -207,13 +207,22 @@
   .scroll-list { max-height: 340px; overflow-y: auto; }
 
   /* ---------- Search / filter row ---------- */
-  .filter-fields { display: grid; grid-template-columns: 1fr; gap: 14px; }
+  /* The grid's own gap spaces the fields from each other, so they drop their
+     individual margins — but the group still needs to keep its distance from
+     whatever follows it. */
+  .filter-fields { display: grid; grid-template-columns: 1fr; gap: 14px; margin-bottom: 18px; }
   .filter-fields .field { margin-bottom: 0; }
 
   .section-label {
     font-size: 15px;
     color: #333;
     display: block;
+  }
+
+  /* Keep-apart marker: dark red border and text, no colour-only meaning. */
+  .conflict-tag {
+    border-color: var(--danger);
+    color: var(--danger);
   }
 
   /* ---------- Notices ---------- */
@@ -473,6 +482,32 @@
     </div>
   </div>
 
+  <div class="panel">
+    <h2>Keep apart</h2>
+    <p class="subtitle">These pairs will never be put on the same court. Unlike the
+      other preferences this is a firm rule — if it can't be met you'll get a warning
+      rather than a quietly broken schedule.</p>
+
+    <div class="filter-fields">
+      <div class="field">
+        <label for="conflictPlayerA">Player</label>
+        <select id="conflictPlayerA"></select>
+      </div>
+      <div class="field">
+        <label for="conflictPlayerB">Keep away from</label>
+        <select id="conflictPlayerB"></select>
+      </div>
+    </div>
+
+    <div id="conflictFormMessage"></div>
+
+    <div class="button-row">
+      <button class="secondary" id="addConflictButton" type="button">Add pair</button>
+    </div>
+
+    <div id="conflictList"></div>
+  </div>
+
   <h2>Roster</h2>
 
   <div class="filter-fields">
@@ -528,6 +563,18 @@ const PENALTY_REPEAT_PARTNER     = 10;    // per repeated partner pairing
 const PENALTY_REPEAT_OPPONENT    = 5;     // per repeated opponent pairing
 const PENALTY_SITOUT_IMBALANCE   = 8;     // per unit of (most sat - least sat)
 const PENALTY_SAME_COURT_IN_A_ROW = 3;    // per player stuck on same court no.
+const PENALTY_REPEAT_SINGLES     = 15;    // per repeated 1v1 matchup
+
+/*
+ * Keep-apart pairs are a HARD constraint, not a preference. The penalty is
+ * huge so that any schedule containing one is worse than every schedule
+ * that doesn't, which pushes the search away from them entirely.
+ *
+ * A big number is not a guarantee, though — if separation is impossible the
+ * search returns a violating schedule anyway. So we also inspect the winner
+ * afterwards and warn loudly. See findConflictViolations.
+ */
+const PENALTY_CONFLICT = 100000;          // per keep-apart pair sharing a court
 
 
 /* =========================================================================
@@ -551,7 +598,8 @@ function buildDefaultData() {
       { id: "int-adv",  name: "Intermediate/Advanced", level: 4 },
       { id: "advanced", name: "Advanced",              level: 5 }
     ],
-    players: []
+    players: [],
+    conflicts: []   // pairs who must never share a court
   };
 }
 
@@ -606,7 +654,34 @@ function cleanUpData(rawData) {
     }
   }
 
+  // --- Keep-apart pairs ---
+  // Only keep pairs where both people actually exist, so a deleted player
+  // can never leave behind a rule that silently blocks a phantom.
+  const knownPlayerIds = new Set(safeData.players.map(function (p) { return p.id; }));
+  if (Array.isArray(rawData.conflicts)) {
+    const seenPairs = new Set();
+    for (const conflict of rawData.conflicts) {
+      if (!conflict || typeof conflict.a !== "string" || typeof conflict.b !== "string") continue;
+      if (conflict.a === conflict.b) continue; // nobody conflicts with themselves
+      if (!knownPlayerIds.has(conflict.a) || !knownPlayerIds.has(conflict.b)) continue;
+
+      // Store each pair once, in a consistent order, so A+B and B+A can't both exist.
+      const key = makeConflictKey(conflict.a, conflict.b);
+      if (seenPairs.has(key)) continue;
+      seenPairs.add(key);
+
+      safeData.conflicts.push({ a: conflict.a, b: conflict.b });
+    }
+  }
+
   return safeData;
+}
+
+/** An order-independent key for a pair of player ids, e.g. "p3|p7". */
+function makeConflictKey(playerIdA, playerIdB) {
+  return playerIdA < playerIdB
+    ? playerIdA + "|" + playerIdB
+    : playerIdB + "|" + playerIdA;
 }
 
 /** Reads saved data, falling back to defaults if nothing is saved or it is unreadable. */
@@ -649,6 +724,24 @@ function getPlayersInSection(sectionId) {
   return appData.players
     .filter(function (player) { return player.sections.indexOf(sectionId) !== -1; })
     .sort(function (a, b) { return a.name.localeCompare(b.name); });
+}
+
+/** True if these two people must be kept on separate courts. */
+function areKeptApart(playerIdA, playerIdB) {
+  const key = makeConflictKey(playerIdA, playerIdB);
+  return appData.conflicts.some(function (conflict) {
+    return makeConflictKey(conflict.a, conflict.b) === key;
+  });
+}
+
+/** Everyone this player must be kept away from. */
+function getConflictPartners(playerId) {
+  const partners = [];
+  for (const conflict of appData.conflicts) {
+    if (conflict.a === playerId) partners.push(conflict.b);
+    if (conflict.b === playerId) partners.push(conflict.a);
+  }
+  return partners;
 }
 
 /** Makes an id that is not already taken, e.g. "p7". */
@@ -963,13 +1056,59 @@ function countRepeats(pairCounts) {
   return repeats;
 }
 
+/** True when a court is a 1v1 rather than a doubles game. */
+function isSinglesCourt(court) {
+  return court.teamOne.length === 1 && court.teamTwo.length === 1;
+}
+
+/**
+ * Finds every place a keep-apart pair ended up on the same court.
+ *
+ * Being on the same court is what counts — partners or opponents, doubles
+ * or singles, it is all the same violation.
+ *
+ * Returns a list so the winning schedule can be described precisely to the
+ * user. The search itself only cares how long that list is.
+ */
+function findConflictViolations(schedule, conflictKeys) {
+  const violations = [];
+  if (conflictKeys.size === 0) return violations; // nothing to check, exit early
+
+  schedule.rounds.forEach(function (round, roundIndex) {
+    round.courts.forEach(function (court, courtIndex) {
+      const onCourt = court.teamOne.concat(court.teamTwo);
+
+      for (let i = 0; i < onCourt.length; i++) {
+        for (let j = i + 1; j < onCourt.length; j++) {
+          if (conflictKeys.has(makePairKey(onCourt[i], onCourt[j]))) {
+            violations.push({
+              roundNumber: roundIndex + 1,
+              courtNumber: courtIndex + 1,
+              playerA: onCourt[i],
+              playerB: onCourt[j],
+              onSinglesCourt: isSinglesCourt(court)
+            });
+          }
+        }
+      }
+    });
+  });
+
+  return violations;
+}
+
 /**
  * Scores a schedule and also returns the raw numbers behind the score,
  * so we can show the user what the repeats actually are.
  */
-function scoreSchedule(schedule, playerCount) {
+function scoreSchedule(schedule, playerCount, conflictKeys) {
   const partnerCounts = new Map();
   const opponentCounts = new Map();
+
+  // Singles matchups are tracked separately from general opponents. Playing
+  // someone at 1v1 and later meeting them in a doubles game is NOT a repeat
+  // singles matchup, so those two things cannot share one tally.
+  const singlesCounts = new Map();
 
   // Remembers which court number each player was on in the previous round.
   // -1 means "was not on a court last round".
@@ -984,6 +1123,12 @@ function scoreSchedule(schedule, playerCount) {
       recordPartnerPairs(court.teamTwo, partnerCounts);
       recordOpponentPairs(court.teamOne, court.teamTwo, opponentCounts);
 
+      // A 1v1 also counts as a normal opponent meeting, above; this extra
+      // tally is only about having the SAME singles game twice.
+      if (isSinglesCourt(court)) {
+        recordOpponentPairs(court.teamOne, court.teamTwo, singlesCounts);
+      }
+
       for (const player of court.teamOne.concat(court.teamTwo)) {
         currentCourtOf[player.index] = courtNumber;
         if (previousCourtOf[player.index] === courtNumber) {
@@ -997,21 +1142,27 @@ function scoreSchedule(schedule, playerCount) {
 
   const repeatedPartners = countRepeats(partnerCounts);
   const repeatedOpponents = countRepeats(opponentCounts);
+  const repeatedSingles = countRepeats(singlesCounts);
+  const conflictViolations = findConflictViolations(schedule, conflictKeys).length;
 
   const mostSitOuts = Math.max.apply(null, schedule.sitOutTally);
   const leastSitOuts = Math.min.apply(null, schedule.sitOutTally);
   const sitOutImbalance = mostSitOuts - leastSitOuts;
 
   const score =
-      repeatedPartners  * PENALTY_REPEAT_PARTNER
-    + repeatedOpponents * PENALTY_REPEAT_OPPONENT
-    + sitOutImbalance   * PENALTY_SITOUT_IMBALANCE
-    + sameCourtInARow   * PENALTY_SAME_COURT_IN_A_ROW;
+      conflictViolations * PENALTY_CONFLICT
+    + repeatedPartners   * PENALTY_REPEAT_PARTNER
+    + repeatedOpponents  * PENALTY_REPEAT_OPPONENT
+    + repeatedSingles    * PENALTY_REPEAT_SINGLES
+    + sitOutImbalance    * PENALTY_SITOUT_IMBALANCE
+    + sameCourtInARow    * PENALTY_SAME_COURT_IN_A_ROW;
 
   return {
     score: score,
+    conflictViolations: conflictViolations,
     repeatedPartners: repeatedPartners,
     repeatedOpponents: repeatedOpponents,
+    repeatedSingles: repeatedSingles,
     sitOutImbalance: sitOutImbalance,
     sameCourtInARow: sameCourtInARow,
     mostSitOuts: mostSitOuts,
@@ -1026,7 +1177,7 @@ function scoreSchedule(schedule, playerCount) {
    Build ATTEMPT_COUNT random schedules, score each one, keep the best.
    ========================================================================= */
 
-function findBestSchedule(players, roundCount, roundShape) {
+function findBestSchedule(players, roundCount, roundShape, conflictKeys) {
   const startTime = performance.now();
 
   let bestSchedule = null;
@@ -1034,7 +1185,7 @@ function findBestSchedule(players, roundCount, roundShape) {
 
   for (let attempt = 0; attempt < ATTEMPT_COUNT; attempt++) {
     const candidate = buildRandomSchedule(players, roundCount, roundShape);
-    const report = scoreSchedule(candidate, players.length);
+    const report = scoreSchedule(candidate, players.length, conflictKeys);
 
     if (bestReport === null || report.score < bestReport.score) {
       bestSchedule = candidate;
@@ -1072,6 +1223,179 @@ function checkFeasibility(playerCount, roundCount, playersPerCourt) {
     unavoidableRepeats: unavoidableRepeats,
     zeroRepeatsPossible: unavoidableRepeats === 0
   };
+}
+
+/**
+ * Translates the saved keep-apart pairs into index pairs for tonight.
+ *
+ * The generator identifies people by their position in tonight's list, not
+ * by their saved id, so the rules have to be converted before use. Pairs
+ * where one or both people are not playing simply drop out.
+ */
+function buildConflictKeys(players) {
+  const indexOfPlayerId = new Map();
+  for (const player of players) {
+    indexOfPlayerId.set(player.id, player.index);
+  }
+
+  const keys = new Set();
+  for (const conflict of appData.conflicts) {
+    const indexA = indexOfPlayerId.get(conflict.a);
+    const indexB = indexOfPlayerId.get(conflict.b);
+    if (indexA === undefined || indexB === undefined) continue; // not both here
+
+    keys.add(makePairKey({ index: indexA }, { index: indexB }));
+  }
+  return keys;
+}
+
+/**
+ * Finds the biggest group of players who ALL have to be kept apart from
+ * each other — a mutual falling-out between three people, say.
+ *
+ * This matters because such a group needs one separate court per member.
+ * We search by growing a group one player at a time, only ever adding
+ * someone who conflicts with everyone already in it.
+ *
+ * The search only ever looks at players who have at least one conflict,
+ * which in practice is a handful, so the cost is trivial.
+ */
+function findLargestKeepApartGroup(players) {
+  const conflicted = players.filter(function (player) {
+    return getConflictPartners(player.id).length > 0;
+  });
+
+  function growGroup(currentGroup, candidates) {
+    let best = currentGroup;
+
+    candidates.forEach(function (candidate, position) {
+      const conflictsWithAll = currentGroup.every(function (member) {
+        return areKeptApart(member.id, candidate.id);
+      });
+      if (!conflictsWithAll) return;
+
+      // Only consider later candidates, so each group is built once.
+      const grown = growGroup(currentGroup.concat([candidate]), candidates.slice(position + 1));
+      if (grown.length > best.length) best = grown;
+    });
+
+    return best;
+  }
+
+  return growGroup([], conflicted);
+}
+
+/**
+ * Works out, before we search, whether the keep-apart rules can actually be
+ * obeyed tonight. Returns a list of plain-English problems (empty is good).
+ *
+ * The reasoning: each member of a mutually-conflicting group needs either
+ * their own court or a place on the sit-out bench. The bench holds everyone
+ * sitting, but each court can only take one of them. So the group fits when
+ *     group size <= number of courts + number of sit-out places.
+ *
+ * `courtsRequested` is how many courts the user typed in, which can be more
+ * than we actually use — 4 players fill one doubles court and leave the rest
+ * empty. We need it so the advice at the end names the real bottleneck
+ * instead of telling someone with 3 spare courts to go and find another one.
+ */
+function checkKeepApartFeasibility(players, roundShape, courtsRequested) {
+  const problems = [];
+
+  const playingIds = new Set(players.map(function (player) { return player.id; }));
+  const activePairs = appData.conflicts.filter(function (conflict) {
+    return playingIds.has(conflict.a) && playingIds.has(conflict.b);
+  });
+
+  if (activePairs.length === 0) return problems; // no rules apply tonight
+
+  const courtCount = roundShape.courtSizes.length;
+  const placesAvailable = courtCount + roundShape.sitOutCount;
+  const largestGroup = findLargestKeepApartGroup(players);
+
+  if (largestGroup.length > placesAvailable) {
+    const names = largestGroup.map(function (player) { return player.name; });
+    const nameList = names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+
+    // If courts are sitting empty, another court would not help — there are
+    // simply not enough people to spread out. Say the thing that actually works.
+    const courtsAreSpare = courtsRequested > courtCount;
+    const adviceForMoreRoom = courtsAreSpare
+      ? "You have " + courtsRequested + " courts but only enough players to fill " +
+        courtCount + ". Bring more players, or sit one of them out."
+      : "Add a court, or sit one of them out.";
+
+    problems.push(
+      nameList + (largestGroup.length === 2
+        ? " have to be kept apart, which needs 2 separate places."
+        : " all have to be kept apart from each other, which needs " +
+          largestGroup.length + " separate places.") +
+      (courtCount === 1 ? " There is only " : " There are only ") + courtCount +
+      (courtCount === 1 ? " court and " : " courts and ") + roundShape.sitOutCount +
+      (roundShape.sitOutCount === 1 ? " sit-out place" : " sit-out places") +
+      " \u2014 " + placesAvailable + " in total. " + adviceForMoreRoom
+    );
+  }
+
+  // The singles trap: when the only court left is a 1v1, whoever fills it is
+  // stuck with the other person. If every court is a singles court and two
+  // people who must stay apart are both playing, there is no room to hide.
+  const allCourtsAreSingles = roundShape.courtSizes.every(function (size) { return size === 2; });
+
+  if (allCourtsAreSingles && courtCount === 1 && roundShape.sitOutCount === 0) {
+    const pair = activePairs[0];
+    problems.push(
+      "The only game tonight is a single 1v1 between " +
+      findPlayer(pair.a).name + " and " + findPlayer(pair.b).name +
+      ", who must be kept apart. Add a player or a court."
+    );
+  }
+
+  return problems;
+}
+
+/**
+ * A second, subtler impossibility: with only ONE court, the only way to keep
+ * a pair apart is to bench one of them EVERY round. That quietly collides
+ * with sharing the sit-outs fairly.
+ *
+ * Over R rounds with S sit-out places and P players, fair rotation means
+ * nobody sits more than ceil(R x S / P) times. Two people can therefore
+ * cover at most twice that many rounds between them. If that is less than R,
+ * they must end up on court together at some point, no matter how the search
+ * shuffles things.
+ *
+ * Example: 3 players, 1 court, 1 sitting, 3 rounds. Fair share is 1 sit-out
+ * each, so the pair can cover only 2 of the 3 rounds — round three forces
+ * them together.
+ */
+function checkSingleCourtRotation(players, roundShape, roundCount) {
+  const problems = [];
+
+  const playingIds = new Set(players.map(function (player) { return player.id; }));
+  const activePairs = appData.conflicts.filter(function (conflict) {
+    return playingIds.has(conflict.a) && playingIds.has(conflict.b);
+  });
+
+  // With two or more courts a pair can always be split across courts instead.
+  if (activePairs.length === 0) return problems;
+  if (roundShape.courtSizes.length !== 1) return problems;
+  if (roundShape.sitOutCount === 0) return problems; // already reported above
+
+  const fairShareEach = Math.ceil((roundCount * roundShape.sitOutCount) / players.length);
+  const roundsThePairCanCover = fairShareEach * 2;
+
+  if (roundsThePairCanCover < roundCount) {
+    const pair = activePairs[0];
+    problems.push(
+      "With one court, " + findPlayer(pair.a).name + " or " + findPlayer(pair.b).name +
+      " has to sit out every single round to stay apart, but sharing the sit-outs " +
+      "fairly only lets them sit " + roundsThePairCanCover + " of the " + roundCount +
+      " rounds. Add a court, or run " + roundsThePairCanCover + " rounds or fewer."
+    );
+  }
+
+  return problems;
 }
 
 
@@ -1161,6 +1485,9 @@ function renderStats(result, layoutText) {
     report.repeatedOpponents + " repeated opponent " +
     (report.repeatedOpponents === 1 ? "pairing" : "pairings")));
   list.appendChild(createElement("li", null,
+    report.repeatedSingles + " repeated singles " +
+    (report.repeatedSingles === 1 ? "matchup" : "matchups")));
+  list.appendChild(createElement("li", null,
     "Sit-outs range from " + report.leastSitOuts + " to " + report.mostSitOuts +
     " per player (imbalance of " + report.sitOutImbalance + ")"));
   list.appendChild(createElement("li", null,
@@ -1172,9 +1499,34 @@ function renderStats(result, layoutText) {
   resultsElement.appendChild(box);
 }
 
+/**
+ * The red warning shown when the winning schedule still puts a keep-apart
+ * pair together. We never present such a schedule as if it were fine.
+ */
+function renderConflictWarning(violations) {
+  const box = createElement("div", "notice error");
+
+  box.appendChild(createElement("p", null,
+    violations.length === 1
+      ? "Keep-apart rule broken in the schedule below."
+      : "Keep-apart rules broken " + violations.length + " times in the schedule below."));
+
+  for (const violation of violations) {
+    box.appendChild(createElement("p", null,
+      "Could not keep " + violation.playerA.name + " and " + violation.playerB.name +
+      " apart in round " + violation.roundNumber +
+      (violation.onSinglesCourt
+        ? " (they are the 1v1 on court " + violation.courtNumber + ")"
+        : " (court " + violation.courtNumber + ")") +
+      ". Adjust manually or sit one of them out."));
+  }
+
+  resultsElement.appendChild(box);
+}
+
 /** Draws one court: the two teams and a VS between them. */
 function renderCourt(court, courtNumber) {
-  const isSingles = court.teamOne.length === 1 && court.teamTwo.length === 1;
+  const isSingles = isSinglesCourt(court);
 
   const card = createElement("div", "court");
   const heading = createElement("p", "court-name", "Court " + (courtNumber + 1));
@@ -1517,8 +1869,25 @@ function handleGenerateClick() {
   const feasibility = checkFeasibility(players.length, roundCount, playersPerCourt);
   renderFeasibilityNotice(feasibility, players.length, roundCount);
 
+  // --- Warn about impossible keep-apart rules BEFORE spending the effort ---
+  const keepApartProblems = checkKeepApartFeasibility(players, roundShape, courtCount)
+    .concat(checkSingleCourtRotation(players, roundShape, roundCount));
+
+  for (const problem of keepApartProblems) {
+    showError(problem);
+  }
+
   // --- Search, then show what we found ---
-  const result = findBestSchedule(players, roundCount, roundShape);
+  const conflictKeys = buildConflictKeys(players);
+  const result = findBestSchedule(players, roundCount, roundShape, conflictKeys);
+
+  // The huge penalty steers the search away from violations, but when they
+  // are unavoidable the winner will still contain one. Always check.
+  const violations = findConflictViolations(result.schedule, conflictKeys);
+  if (violations.length > 0) {
+    renderConflictWarning(violations);
+  }
+
   renderStats(result, describeLayout(roundShape, playersPerCourt));
   renderSchedule(result.schedule);
 }
@@ -1678,6 +2047,8 @@ function handleSavePlayerClick() {
   renderRoster();
   renderAttendanceList();
   renderOtherSectionList();
+  renderConflictPickers();
+  renderConflictList();
 
   if (!savedOk) {
     showNotice(playerFormMessage,
@@ -1701,6 +2072,13 @@ function handleDeletePlayerClick(playerId) {
   if (!confirmed) return;
 
   appData.players = appData.players.filter(function (other) { return other.id !== playerId; });
+
+  // Their keep-apart rules die with them, otherwise the pair list would
+  // point at somebody who no longer exists.
+  appData.conflicts = appData.conflicts.filter(function (conflict) {
+    return conflict.a !== playerId && conflict.b !== playerId;
+  });
+
   saveData();
 
   // If we were editing that person, the form is now pointing at nothing.
@@ -1712,6 +2090,8 @@ function handleDeletePlayerClick(playerId) {
   renderRoster();
   renderAttendanceList();
   renderOtherSectionList();
+  renderConflictPickers();
+  renderConflictList();
 }
 
 /** Builds one row in the roster list: name, gender, edit and delete. */
@@ -1722,6 +2102,23 @@ function renderRosterRow(player) {
   if (player.gender) {
     nameCell.appendChild(createElement("span", "tag", player.gender));
   }
+
+  // Flag anyone caught by a keep-apart rule, and say who from, so the rule
+  // is visible while scanning the roster rather than only in its own panel.
+  const keptApartFrom = getConflictPartners(player.id);
+  if (keptApartFrom.length > 0) {
+    const names = keptApartFrom
+      .map(function (partnerId) {
+        const partner = findPlayer(partnerId);
+        return partner === null ? null : partner.name;
+      })
+      .filter(function (name) { return name !== null; });
+
+    const marker = createElement("span", "tag conflict-tag", "KEEP APART");
+    nameCell.appendChild(marker);
+    nameCell.appendChild(createElement("span", "section-label", "Not with " + names.join(", ")));
+  }
+
   row.appendChild(nameCell);
 
   const actions = createElement("div", "row-actions");
@@ -1740,6 +2137,113 @@ function renderRosterRow(player) {
 
   return row;
 }
+
+/* ---------- Keep-apart pairs ---------- */
+
+const conflictPlayerA = document.getElementById("conflictPlayerA");
+const conflictPlayerB = document.getElementById("conflictPlayerB");
+const conflictFormMessage = document.getElementById("conflictFormMessage");
+const conflictList = document.getElementById("conflictList");
+
+/** Fills both keep-apart dropdowns with every player, keeping any choice made. */
+function renderConflictPickers() {
+  const sortedPlayers = appData.players.slice().sort(function (a, b) {
+    return a.name.localeCompare(b.name);
+  });
+
+  [conflictPlayerA, conflictPlayerB].forEach(function (picker) {
+    const previousChoice = picker.value;
+    emptyElement(picker);
+
+    for (const player of sortedPlayers) {
+      const option = document.createElement("option");
+      option.value = player.id;
+      option.textContent = player.name;
+      picker.appendChild(option);
+    }
+
+    if (previousChoice && findPlayer(previousChoice) !== null) {
+      picker.value = previousChoice;
+    }
+  });
+}
+
+/** Draws the existing keep-apart pairs, each with a Remove button. */
+function renderConflictList() {
+  emptyElement(conflictList);
+
+  if (appData.players.length < 2) {
+    conflictList.appendChild(createElement("div", "empty-note",
+      "Add at least two players before setting up keep-apart pairs."));
+    return;
+  }
+
+  if (appData.conflicts.length === 0) {
+    conflictList.appendChild(createElement("div", "empty-note",
+      "No keep-apart pairs. Everyone can play with everyone."));
+    return;
+  }
+
+  for (const conflict of appData.conflicts) {
+    const playerA = findPlayer(conflict.a);
+    const playerB = findPlayer(conflict.b);
+    if (playerA === null || playerB === null) continue; // safety net
+
+    const row = createElement("div", "roster-row");
+    row.appendChild(createElement("span", "roster-name",
+      playerA.name + "  \u2260  " + playerB.name));
+
+    const actions = createElement("div", "row-actions");
+    const removeButton = createElement("button", "secondary", "Remove");
+    removeButton.type = "button";
+    removeButton.addEventListener("click", function () {
+      appData.conflicts = appData.conflicts.filter(function (other) {
+        return makeConflictKey(other.a, other.b) !== makeConflictKey(conflict.a, conflict.b);
+      });
+      saveData();
+      renderConflictList();
+      renderRoster();
+    });
+    actions.appendChild(removeButton);
+    row.appendChild(actions);
+
+    conflictList.appendChild(row);
+  }
+}
+
+/** Adds a keep-apart pair from the two dropdowns. */
+function handleAddConflictClick() {
+  emptyElement(conflictFormMessage);
+
+  const idA = conflictPlayerA.value;
+  const idB = conflictPlayerB.value;
+
+  if (!idA || !idB) {
+    showNotice(conflictFormMessage, "Pick two players first.", "error");
+    return;
+  }
+  if (idA === idB) {
+    showNotice(conflictFormMessage, "Pick two different players.", "error");
+    return;
+  }
+  if (areKeptApart(idA, idB)) {
+    showNotice(conflictFormMessage, "Those two are already kept apart.", "error");
+    return;
+  }
+
+  appData.conflicts.push({ a: idA, b: idB });
+  saveData();
+
+  renderConflictList();
+  renderRoster();
+
+  showNotice(conflictFormMessage,
+    findPlayer(idA).name + " and " + findPlayer(idB).name +
+    " will be kept on separate courts.", "success");
+}
+
+document.getElementById("addConflictButton").addEventListener("click", handleAddConflictClick);
+
 
 /** Fills the "All sections" filter dropdown, keeping the current choice. */
 function renderRosterSectionFilter() {
@@ -1942,6 +2446,8 @@ function handleImportFileChosen(event) {
     renderPlayerSectionChoices();
     renderRosterSectionFilter();
     renderRoster();
+    renderConflictPickers();
+    renderConflictList();
     renderSectionPicker();
     renderAttendanceList();
     renderOtherSectionList();
@@ -2008,6 +2514,8 @@ renderGuestList();
 renderPlayerSectionChoices();
 renderRosterSectionFilter();
 renderRoster();
+renderConflictPickers();
+renderConflictList();
 showScreen("session");
 </script>
 
