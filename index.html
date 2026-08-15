@@ -44,10 +44,14 @@
     margin: 0 0 20px;
     border-bottom: 3px solid var(--ink);
     padding-bottom: 12px;
+    /* Three tabs don't fit across a phone, so let them run onto a second
+       row rather than squeezing the labels. */
+    flex-wrap: wrap;
   }
 
   .tab-button {
     flex: 1;
+    min-width: 140px;
     width: auto; /* flex sizes these, not the 100% width other buttons get */
     min-height: 48px;
     font-size: 18px;
@@ -333,6 +337,21 @@
     padding: 8px 12px;
   }
 
+  /* ---------- History screen ---------- */
+  /* The save button sits under the stats, away from Generate, so the two
+     are never confused for one another. */
+  .save-session { margin: 20px 0; }
+  .save-session button { width: auto; min-width: 220px; }
+  .save-session .hint { display: block; margin: 8px 0 0; }
+
+  /* Stats under a player's name in the summary. */
+  .summary-line {
+    flex-basis: 100%;
+    font-size: 15px;
+    color: #333;
+    margin: 0;
+  }
+
   /* ---------- Wider screens (iPad landscape ~1024px) ---------- */
   @media (min-width: 700px) {
     body { padding: 24px 32px; max-width: 1100px; margin: 0 auto; }
@@ -357,6 +376,7 @@
 <div class="tab-bar" role="tablist">
   <button class="tab-button" id="tabSession" type="button" role="tab" aria-selected="true">Session</button>
   <button class="tab-button" id="tabManage" type="button" role="tab" aria-selected="false">Manage players</button>
+  <button class="tab-button" id="tabHistory" type="button" role="tab" aria-selected="false">History</button>
 </div>
 
 
@@ -537,6 +557,26 @@
 </div>
 
 
+<!-- ===================== HISTORY SCREEN ===================== -->
+<div class="screen" id="historyScreen">
+
+  <p class="subtitle">Sessions you chose to save. These feed into future
+    schedules so the same people don't keep drawing each other.</p>
+
+  <h2>Per-player summary</h2>
+
+  <div class="field">
+    <label for="historySectionPicker">Section</label>
+    <select id="historySectionPicker"></select>
+  </div>
+
+  <div id="historySummary"></div>
+
+  <h2>Saved sessions</h2>
+  <div id="historyList"></div>
+</div>
+
+
 <script>
 /* =========================================================================
    PICKLEBALL ROTATION SCHEDULER
@@ -566,6 +606,21 @@ const PENALTY_SAME_COURT_IN_A_ROW = 3;    // per player stuck on same court no.
 const PENALTY_REPEAT_SINGLES     = 15;    // per repeated 1v1 matchup
 
 /*
+ * PENALTIES THAT LOOK AT PAST SESSIONS
+ *
+ * These are deliberately smaller than the within-session ones above:
+ * partnering the same person twice in one evening is far more noticeable
+ * than partnering them again a fortnight later.
+ *
+ * The first two are multiplied by a recency weight (see recencyWeightFor),
+ * so an old session nudges the search rather than shoving it.
+ */
+const HISTORY_SESSIONS_USED       = 8;    // how many past sessions to look at
+const PENALTY_HISTORY_PARTNER     = 4;    // x weight, per partner seen before
+const PENALTY_HISTORY_OPPONENT    = 2;    // x weight, per opponent seen before
+const PENALTY_HISTORY_SITOUT_SPREAD = 6;  // per unit of imbalance in lifetime sit-outs
+
+/*
  * Keep-apart pairs are a HARD constraint, not a preference. The penalty is
  * huge so that any schedule containing one is worse than every schedule
  * that doesn't, which pushes the search away from them entirely.
@@ -585,7 +640,13 @@ const PENALTY_CONFLICT = 100000;          // per keep-apart pair sharing a court
    ========================================================================= */
 
 const STORAGE_KEY = "pickleball-data";
-const DATA_VERSION = 1;
+
+/*
+ * Version 1 had no "history". Version 2 adds it. Reading a version 1 file is
+ * not a special case in the code — cleanUpData simply finds no history and
+ * leaves the empty array from buildDefaultData in place.
+ */
+const DATA_VERSION = 2;
 
 /** The starting point for a brand new device: five sections, nobody in them. */
 function buildDefaultData() {
@@ -599,7 +660,8 @@ function buildDefaultData() {
       { id: "advanced", name: "Advanced",              level: 5 }
     ],
     players: [],
-    conflicts: []   // pairs who must never share a court
+    conflicts: [],  // pairs who must never share a court
+    history: []     // sessions that were actually played, oldest first
   };
 }
 
@@ -674,7 +736,76 @@ function cleanUpData(rawData) {
     }
   }
 
+  // --- History ---
+  // A version 1 file simply has no history field, so nothing happens here and
+  // the empty array from buildDefaultData stands. That IS the upgrade path.
+  //
+  // Unlike conflicts, we do NOT drop ids of players who have since been
+  // deleted. History is a record of what actually happened that evening;
+  // rewriting it because someone left the club would be dishonest. Unknown
+  // ids are simply skipped wherever history is read.
+  if (Array.isArray(rawData.history)) {
+    for (const session of rawData.history) {
+      const cleanSession = cleanUpHistorySession(session);
+      if (cleanSession !== null) safeData.history.push(cleanSession);
+    }
+  }
+
   return safeData;
+}
+
+/** Keeps only the pairs that are genuinely two player ids, e.g. [["p1","p2"]]. */
+function cleanUpPairList(rawPairs) {
+  if (!Array.isArray(rawPairs)) return [];
+
+  const cleanPairs = [];
+  const seen = new Set();
+
+  for (const pair of rawPairs) {
+    if (!Array.isArray(pair) || pair.length !== 2) continue;
+    if (typeof pair[0] !== "string" || typeof pair[1] !== "string") continue;
+    if (pair[0] === pair[1]) continue;
+
+    // One entry per pair per session, in a consistent order.
+    const key = makeConflictKey(pair[0], pair[1]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    cleanPairs.push([pair[0], pair[1]]);
+  }
+
+  return cleanPairs;
+}
+
+/** Rebuilds one saved session, or returns null if it is too broken to use. */
+function cleanUpHistorySession(rawSession) {
+  if (!rawSession || typeof rawSession !== "object") return null;
+  if (typeof rawSession.date !== "string" || rawSession.date === "") return null;
+  if (typeof rawSession.sectionId !== "string") return null;
+
+  const playerIds = Array.isArray(rawSession.playerIds)
+    ? rawSession.playerIds.filter(function (id) { return typeof id === "string" && id !== ""; })
+    : [];
+
+  if (playerIds.length === 0) return null; // a session with nobody in it tells us nothing
+
+  const satOutCounts = {};
+  if (rawSession.satOutCounts && typeof rawSession.satOutCounts === "object") {
+    for (const playerId of Object.keys(rawSession.satOutCounts)) {
+      const count = rawSession.satOutCounts[playerId];
+      if (Number.isFinite(count) && count >= 0) satOutCounts[playerId] = count;
+    }
+  }
+
+  return {
+    date: rawSession.date,
+    sectionId: rawSession.sectionId,
+    playerIds: playerIds,
+    satOutCounts: satOutCounts,
+    partners:  cleanUpPairList(rawSession.partners),
+    opponents: cleanUpPairList(rawSession.opponents),
+    singles:   cleanUpPairList(rawSession.singles)
+  };
 }
 
 /** An order-independent key for a pair of player ids, e.g. "p3|p7". */
@@ -742,6 +873,47 @@ function getConflictPartners(playerId) {
     if (conflict.b === playerId) partners.push(conflict.a);
   }
   return partners;
+}
+
+/**
+ * The most recent saved sessions for one section, newest first.
+ *
+ * Sorting is by date, but two sessions can share a date (a morning and an
+ * evening group). When that happens we fall back to the order they were
+ * saved in, so "most recent" still means what you'd expect.
+ */
+function getRecentSessionsForSection(sectionId, howMany) {
+  const forSection = [];
+
+  appData.history.forEach(function (session, positionSaved) {
+    if (session.sectionId === sectionId) {
+      forSection.push({ session: session, positionSaved: positionSaved });
+    }
+  });
+
+  forSection.sort(function (a, b) {
+    if (a.session.date !== b.session.date) {
+      return a.session.date < b.session.date ? 1 : -1; // later date first
+    }
+    return b.positionSaved - a.positionSaved;          // saved later first
+  });
+
+  return forSection
+    .slice(0, howMany)
+    .map(function (entry) { return entry.session; });
+}
+
+/**
+ * How much a session counts for, given its position in the newest-first list.
+ *
+ * Position 0 is the most recent and counts full. Position 7 is eight sessions
+ * back and counts an eighth. Dividing by "how many sessions ago" gives a curve
+ * that drops off quickly at first, which matches how it feels in practice:
+ * last week is vivid, two months ago is barely worth remembering.
+ */
+function recencyWeightFor(positionInList) {
+  const sessionsAgo = positionInList + 1;
+  return 1 / sessionsAgo;
 }
 
 /** Makes an id that is not already taken, e.g. "p7". */
@@ -1017,11 +1189,16 @@ function buildRandomSchedule(players, roundCount, roundShape) {
      +3  each time a player is on the same court number two rounds running
    ========================================================================= */
 
+/** Builds a stable key from two positions in tonight's list, e.g. "3|7". */
+function makeIndexPairKey(indexA, indexB) {
+  const low = Math.min(indexA, indexB);
+  const high = Math.max(indexA, indexB);
+  return low + "|" + high;
+}
+
 /** Builds a stable key for a pair of players, e.g. "3|7". Order doesn't matter. */
 function makePairKey(playerA, playerB) {
-  const low = Math.min(playerA.index, playerB.index);
-  const high = Math.max(playerA.index, playerB.index);
-  return low + "|" + high;
+  return makeIndexPairKey(playerA.index, playerB.index);
 }
 
 /** Records every pair inside one team as having partnered together. */
@@ -1098,10 +1275,93 @@ function findConflictViolations(schedule, conflictKeys) {
 }
 
 /**
+ * Turns past sessions into something the scorer can use quickly.
+ *
+ * History is stored against saved player ids ("p3"), but the generator works
+ * in positions within tonight's list (0, 1, 2...). This translates once, up
+ * front, so the inner loop over 10,000 schedules only ever does map lookups.
+ *
+ * Anyone in the history who isn't playing tonight is skipped, and guests are
+ * never in the history at all, so both simply fall out of the translation.
+ */
+function buildHistoryContext(players, sectionId) {
+  const indexOfPlayerId = new Map();
+  for (const player of players) {
+    indexOfPlayerId.set(player.id, player.index);
+  }
+
+  const partnerWeights = new Map();
+  const opponentWeights = new Map();
+  const pastSitOuts = new Array(players.length).fill(0);
+
+  const sessions = getRecentSessionsForSection(sectionId, HISTORY_SESSIONS_USED);
+
+  /** Adds one session's pairs into a running weight map. */
+  function addPairsToWeights(pairs, weights, weight) {
+    for (const pair of pairs) {
+      const indexA = indexOfPlayerId.get(pair[0]);
+      const indexB = indexOfPlayerId.get(pair[1]);
+      if (indexA === undefined || indexB === undefined) continue; // not here tonight
+
+      const key = makeIndexPairKey(indexA, indexB);
+      weights.set(key, (weights.get(key) || 0) + weight);
+    }
+  }
+
+  sessions.forEach(function (session, position) {
+    const weight = recencyWeightFor(position);
+
+    addPairsToWeights(session.partners, partnerWeights, weight);
+    addPairsToWeights(session.opponents, opponentWeights, weight);
+
+    // Sit-outs are counted as they happened, not weighted. "You have sat out
+    // six times this term" is a plain fact; ageing it would hide it.
+    for (const playerId of Object.keys(session.satOutCounts)) {
+      const index = indexOfPlayerId.get(playerId);
+      if (index !== undefined) pastSitOuts[index] += session.satOutCounts[playerId];
+    }
+  });
+
+  return {
+    sessionsUsed: sessions.length,
+    partnerWeights: partnerWeights,
+    opponentWeights: opponentWeights,
+    pastSitOuts: pastSitOuts
+  };
+}
+
+/** An empty history, for when there is nothing saved yet. */
+function buildEmptyHistoryContext(playerCount) {
+  return {
+    sessionsUsed: 0,
+    partnerWeights: new Map(),
+    opponentWeights: new Map(),
+    pastSitOuts: new Array(playerCount).fill(0)
+  };
+}
+
+/**
+ * Adds up the recency weights for pairings tonight that also happened before.
+ *
+ * A pair that plays together twice tonight repeats history twice over, so the
+ * count for tonight multiplies the weight carried over from past sessions.
+ */
+function weighAgainstHistory(pairCountsTonight, historyWeights) {
+  if (historyWeights.size === 0) return 0;
+
+  let total = 0;
+  for (const [key, timesTonight] of pairCountsTonight) {
+    const weight = historyWeights.get(key);
+    if (weight !== undefined) total += timesTonight * weight;
+  }
+  return total;
+}
+
+/**
  * Scores a schedule and also returns the raw numbers behind the score,
  * so we can show the user what the repeats actually are.
  */
-function scoreSchedule(schedule, playerCount, conflictKeys) {
+function scoreSchedule(schedule, playerCount, conflictKeys, historyContext) {
   const partnerCounts = new Map();
   const opponentCounts = new Map();
 
@@ -1149,13 +1409,43 @@ function scoreSchedule(schedule, playerCount, conflictKeys) {
   const leastSitOuts = Math.min.apply(null, schedule.sitOutTally);
   const sitOutImbalance = mostSitOuts - leastSitOuts;
 
+  // --- How much of tonight is a rerun of previous weeks? ---
+  const historyPartnerWeight = weighAgainstHistory(partnerCounts, historyContext.partnerWeights);
+  const historyOpponentWeight = weighAgainstHistory(opponentCounts, historyContext.opponentWeights);
+
+  /*
+   * Sit-outs are fairest measured over the whole term, not one evening. We
+   * add tonight's sit-outs to those already on record and level THAT, which
+   * is what favours someone who has been benched a lot lately.
+   *
+   * With no saved history this is skipped entirely — every past total would
+   * be zero, so the sum would just be tonight's imbalance counted a second
+   * time on top of PENALTY_SITOUT_IMBALANCE.
+   */
+  let cumulativeSitOutSpread = 0;
+  if (historyContext.sessionsUsed > 0) {
+    let highestTotal = -Infinity;
+    let lowestTotal = Infinity;
+
+    for (let index = 0; index < playerCount; index++) {
+      const lifetimeSitOuts = historyContext.pastSitOuts[index] + schedule.sitOutTally[index];
+      if (lifetimeSitOuts > highestTotal) highestTotal = lifetimeSitOuts;
+      if (lifetimeSitOuts < lowestTotal) lowestTotal = lifetimeSitOuts;
+    }
+
+    cumulativeSitOutSpread = highestTotal - lowestTotal;
+  }
+
   const score =
       conflictViolations * PENALTY_CONFLICT
     + repeatedPartners   * PENALTY_REPEAT_PARTNER
     + repeatedOpponents  * PENALTY_REPEAT_OPPONENT
     + repeatedSingles    * PENALTY_REPEAT_SINGLES
     + sitOutImbalance    * PENALTY_SITOUT_IMBALANCE
-    + sameCourtInARow    * PENALTY_SAME_COURT_IN_A_ROW;
+    + sameCourtInARow    * PENALTY_SAME_COURT_IN_A_ROW
+    + historyPartnerWeight  * PENALTY_HISTORY_PARTNER
+    + historyOpponentWeight * PENALTY_HISTORY_OPPONENT
+    + cumulativeSitOutSpread * PENALTY_HISTORY_SITOUT_SPREAD;
 
   return {
     score: score,
@@ -1166,7 +1456,11 @@ function scoreSchedule(schedule, playerCount, conflictKeys) {
     sitOutImbalance: sitOutImbalance,
     sameCourtInARow: sameCourtInARow,
     mostSitOuts: mostSitOuts,
-    leastSitOuts: leastSitOuts
+    leastSitOuts: leastSitOuts,
+    historyPartnerWeight: historyPartnerWeight,
+    historyOpponentWeight: historyOpponentWeight,
+    cumulativeSitOutSpread: cumulativeSitOutSpread,
+    historySessionsUsed: historyContext.sessionsUsed
   };
 }
 
@@ -1177,15 +1471,18 @@ function scoreSchedule(schedule, playerCount, conflictKeys) {
    Build ATTEMPT_COUNT random schedules, score each one, keep the best.
    ========================================================================= */
 
-function findBestSchedule(players, roundCount, roundShape, conflictKeys) {
+function findBestSchedule(players, roundCount, roundShape, conflictKeys, historyContext) {
   const startTime = performance.now();
+
+  // Callers without any history to consider still get a valid, empty one.
+  const history = historyContext || buildEmptyHistoryContext(players.length);
 
   let bestSchedule = null;
   let bestReport = null;
 
   for (let attempt = 0; attempt < ATTEMPT_COUNT; attempt++) {
     const candidate = buildRandomSchedule(players, roundCount, roundShape);
-    const report = scoreSchedule(candidate, players.length, conflictKeys);
+    const report = scoreSchedule(candidate, players.length, conflictKeys, history);
 
     if (bestReport === null || report.score < bestReport.score) {
       bestSchedule = candidate;
@@ -1422,6 +1719,9 @@ function emptyElement(element) {
 function clearScreen() {
   emptyElement(messagesElement);
   emptyElement(resultsElement);
+
+  // Whatever was on screen is gone, so there is nothing left to save.
+  lastGeneratedSession = null;
 }
 
 /** Puts a coloured message box inside the given container. */
@@ -1473,7 +1773,10 @@ function renderStats(result, layoutText) {
   box.appendChild(createElement("h3", null, "Result"));
   box.appendChild(createElement("p", null, "Layout each round: " + layoutText + "."));
   box.appendChild(createElement("p", null,
-    "Best score: " + report.score + " (lower is better) — found by trying " +
+    // History weights are fractions, so the total can be, too. One decimal
+    // place is plenty — the number is only meaningful next to another score.
+    "Best score: " + Math.round(report.score * 10) / 10 +
+    " (lower is better) — found by trying " +
     result.attemptsRun.toLocaleString() + " random schedules in " +
     Math.round(result.elapsedMs) + " ms."));
 
@@ -1495,6 +1798,60 @@ function renderStats(result, layoutText) {
     (report.sameCourtInARow === 1 ? "time a player stays" : "times a player stays") +
     " on the same court two rounds running"));
   box.appendChild(list);
+
+  // Only mention past sessions when there actually were some.
+  if (report.historySessionsUsed > 0) {
+    box.appendChild(createElement("p", null,
+      "Also balanced against the last " + report.historySessionsUsed +
+      (report.historySessionsUsed === 1 ? " saved session" : " saved sessions") +
+      " for this section, weighted towards the most recent."));
+
+    const historyList = createElement("ul");
+    historyList.appendChild(createElement("li", null,
+      "Repeated partners from past sessions: " +
+      describeHistoryWeight(report.historyPartnerWeight)));
+    historyList.appendChild(createElement("li", null,
+      "Repeated opponents from past sessions: " +
+      describeHistoryWeight(report.historyOpponentWeight)));
+    historyList.appendChild(createElement("li", null,
+      "Spread in sit-outs counting history: " + report.cumulativeSitOutSpread));
+    box.appendChild(historyList);
+  }
+
+  resultsElement.appendChild(box);
+}
+
+/**
+ * Describes a weighted total in words.
+ *
+ * The raw number is a sum of fractions, so "1.83" on its own would puzzle
+ * anyone. Saying "none" when it is zero is the part that actually matters.
+ */
+function describeHistoryWeight(weight) {
+  if (weight === 0) return "none";
+  return Math.round(weight * 100) / 100 + " (weighted)";
+}
+
+/**
+ * The "Save this session" button.
+ *
+ * Deliberately a separate, explicit click rather than something that happens
+ * on Generate: most evenings involve regenerating several times while courts
+ * and numbers get adjusted, and only the last one is actually played.
+ */
+function renderSaveSessionButton() {
+  const box = createElement("div", "save-session");
+
+  const button = createElement("button", "secondary", "Save this session");
+  button.id = "saveSessionButton";
+  button.type = "button";
+  button.addEventListener("click", handleSaveSessionClick);
+  box.appendChild(button);
+
+  box.appendChild(createElement("p", "hint",
+    "Records tonight for future balancing. Nothing is saved until you press this."));
+
+  box.appendChild(createElement("div", null)).id = "saveSessionMessage";
 
   resultsElement.appendChild(box);
 }
@@ -1840,6 +2197,141 @@ function handleAddGuestClick() {
   showNotice(guestFormMessage, "Added " + name + " for tonight.", "success");
 }
 
+/**
+ * The schedule currently on screen, kept so "Save this session" knows what to
+ * record. Regenerating replaces it; it is never written to storage by itself.
+ */
+let lastGeneratedSession = null;
+
+/**
+ * Collects who partnered, opposed, and played 1v1 with whom, as saved ids.
+ *
+ * Two details worth knowing:
+ *  - Guests are dropped. They have no lasting identity, so recording them
+ *    would create pairs pointing at people who no longer exist next week.
+ *  - Each pair is recorded once per session, however many times it came up.
+ *    History answers "did these two play together that week", and the
+ *    within-session penalties already handle repeats inside one evening.
+ */
+function collectSessionPairs(schedule) {
+  const partners = new Map();
+  const opponents = new Map();
+  const singles = new Map();
+
+  function isOnTheRoster(player) {
+    return findPlayer(player.id) !== null;
+  }
+
+  function addPair(store, playerA, playerB) {
+    if (!isOnTheRoster(playerA) || !isOnTheRoster(playerB)) return;
+
+    const key = makeConflictKey(playerA.id, playerB.id);
+    if (!store.has(key)) store.set(key, [playerA.id, playerB.id]);
+  }
+
+  function addPairsWithinTeam(team) {
+    for (let i = 0; i < team.length; i++) {
+      for (let j = i + 1; j < team.length; j++) {
+        addPair(partners, team[i], team[j]);
+      }
+    }
+  }
+
+  function addPairsAcrossTeams(store, teamOne, teamTwo) {
+    for (const playerA of teamOne) {
+      for (const playerB of teamTwo) {
+        addPair(store, playerA, playerB);
+      }
+    }
+  }
+
+  for (const round of schedule.rounds) {
+    for (const court of round.courts) {
+      addPairsWithinTeam(court.teamOne);
+      addPairsWithinTeam(court.teamTwo);
+      addPairsAcrossTeams(opponents, court.teamOne, court.teamTwo);
+
+      if (isSinglesCourt(court)) {
+        addPairsAcrossTeams(singles, court.teamOne, court.teamTwo);
+      }
+    }
+  }
+
+  return {
+    partners:  Array.from(partners.values()),
+    opponents: Array.from(opponents.values()),
+    singles:   Array.from(singles.values())
+  };
+}
+
+/** Turns the schedule on screen into the record we keep of it. */
+function buildHistoryEntry(generated) {
+  const rosterPlayers = generated.players.filter(function (player) {
+    return findPlayer(player.id) !== null; // guests excluded
+  });
+
+  const satOutCounts = {};
+  for (const player of rosterPlayers) {
+    satOutCounts[player.id] = generated.schedule.sitOutTally[player.index];
+  }
+
+  const pairs = collectSessionPairs(generated.schedule);
+
+  return {
+    date: todayAsText(),
+    sectionId: generated.sectionId,
+    playerIds: rosterPlayers.map(function (player) { return player.id; }),
+    satOutCounts: satOutCounts,
+    partners: pairs.partners,
+    opponents: pairs.opponents,
+    singles: pairs.singles
+  };
+}
+
+function handleSaveSessionClick() {
+  const messageBox = document.getElementById("saveSessionMessage");
+  emptyElement(messageBox);
+
+  if (lastGeneratedSession === null) {
+    showNotice(messageBox, "Generate a schedule first.", "error");
+    return;
+  }
+
+  const entry = buildHistoryEntry(lastGeneratedSession);
+
+  if (entry.playerIds.length === 0) {
+    showNotice(messageBox,
+      "Nothing to save — this session is all guests, and guests aren't kept " +
+      "on the roster.", "error");
+    return;
+  }
+
+  appData.history.push(entry);
+
+  if (!saveData()) {
+    appData.history.pop(); // put things back rather than lie about it
+    showNotice(messageBox,
+      "Could not save — the browser refused to write to storage.", "error");
+    return;
+  }
+
+  renderHistoryList();
+  renderHistorySummary();
+
+  // Saving twice would double-count the evening, so the button is spent.
+  const button = document.getElementById("saveSessionButton");
+  button.disabled = true;
+  button.textContent = "Saved";
+
+  const guestCount = lastGeneratedSession.players.length - entry.playerIds.length;
+  showNotice(messageBox,
+    "Saved " + entry.date + " with " + entry.playerIds.length + " player(s)." +
+    (guestCount > 0
+      ? " " + guestCount + " guest(s) left out — they aren't on the roster."
+      : "") +
+    " Future schedules for this section will take it into account.", "success");
+}
+
 function handleGenerateClick() {
   clearScreen();
 
@@ -1879,7 +2371,8 @@ function handleGenerateClick() {
 
   // --- Search, then show what we found ---
   const conflictKeys = buildConflictKeys(players);
-  const result = findBestSchedule(players, roundCount, roundShape, conflictKeys);
+  const historyContext = buildHistoryContext(players, sectionPicker.value);
+  const result = findBestSchedule(players, roundCount, roundShape, conflictKeys, historyContext);
 
   // The huge penalty steers the search away from violations, but when they
   // are unavoidable the winner will still contain one. Always check.
@@ -1888,7 +2381,16 @@ function handleGenerateClick() {
     renderConflictWarning(violations);
   }
 
+  // Held in memory only. It is written to storage if — and only if — the
+  // user presses "Save this session".
+  lastGeneratedSession = {
+    schedule: result.schedule,
+    players: players,
+    sectionId: sectionPicker.value
+  };
+
   renderStats(result, describeLayout(roundShape, playersPerCourt));
+  renderSaveSessionButton();
   renderSchedule(result.schedule);
 }
 
@@ -2397,7 +2899,8 @@ function handleExportClick() {
   URL.revokeObjectURL(temporaryUrl);
 
   showNotice(backupMessage,
-    "Exported " + appData.players.length + " player(s). Copy that file to your " +
+    "Exported " + appData.players.length + " player(s) and " +
+    appData.history.length + " saved session(s). Copy that file to your " +
     "other device, then use Import there.", "success");
 }
 
@@ -2423,10 +2926,12 @@ function handleImportFileChosen(event) {
     }
 
     const confirmed = window.confirm(
-      "Import " + incomingData.players.length + " player(s) and " +
-      incomingData.sections.length + " section(s)?\n\n" +
+      "Import " + incomingData.players.length + " player(s), " +
+      incomingData.sections.length + " section(s) and " +
+      incomingData.history.length + " saved session(s)?\n\n" +
       "This REPLACES your current roster of " + appData.players.length +
-      " player(s) on this device. It cannot be undone."
+      " player(s) and " + appData.history.length +
+      " saved session(s) on this device. It cannot be undone."
     );
 
     if (!confirmed) {
@@ -2451,10 +2956,14 @@ function handleImportFileChosen(event) {
     renderSectionPicker();
     renderAttendanceList();
     renderOtherSectionList();
+    renderHistorySectionPicker();
+    renderHistoryList();
+    renderHistorySummary();
     clearScreen();
 
     showNotice(backupMessage,
-      "Imported " + appData.players.length + " player(s).", "success");
+      "Imported " + appData.players.length + " player(s) and " +
+      appData.history.length + " saved session(s).", "success");
 
     // Let the same file be picked again later.
     importFileInput.value = "";
@@ -2476,22 +2985,247 @@ importFileInput.addEventListener("change", handleImportFileChosen);
 
 
 /* =========================================================================
-   SECTION 11 — SWITCHING SCREENS, AND STARTING UP
+   SECTION 11 — THE HISTORY SCREEN
+
+   Two views of the same saved sessions: the raw list, so you can delete a
+   mistake, and a per-player summary, so you can see at a glance whether
+   somebody is quietly getting a raw deal.
+   ========================================================================= */
+
+const historySectionPicker = document.getElementById("historySectionPicker");
+const historySummary = document.getElementById("historySummary");
+const historyList = document.getElementById("historyList");
+
+/** The section dropdown on the history screen, keeping the current choice. */
+function renderHistorySectionPicker() {
+  const previousChoice = historySectionPicker.value;
+  emptyElement(historySectionPicker);
+
+  for (const section of appData.sections) {
+    const option = createElement("option", null, section.name);
+    option.value = section.id;
+    historySectionPicker.appendChild(option);
+  }
+
+  if (findSection(previousChoice) !== null) {
+    historySectionPicker.value = previousChoice;
+    return;
+  }
+
+  // First look: start on the section we most recently saved a session for.
+  // Otherwise the summary opens on whichever section happens to be first in
+  // the list and announces "nothing saved yet", which reads like a fault.
+  const newestSessions = getAllSessionsNewestFirst();
+  if (newestSessions.length > 0 && findSection(newestSessions[0].sectionId) !== null) {
+    historySectionPicker.value = newestSessions[0].sectionId;
+  }
+}
+
+/** A section's name, or a placeholder if that section has since been removed. */
+function describeSessionSection(sectionId) {
+  const section = findSection(sectionId);
+  return section === null ? "Section no longer exists" : section.name;
+}
+
+/** Every saved session, newest first, whichever section it belongs to. */
+function getAllSessionsNewestFirst() {
+  const ordered = appData.history.map(function (session, positionSaved) {
+    return { session: session, positionSaved: positionSaved };
+  });
+
+  ordered.sort(function (a, b) {
+    if (a.session.date !== b.session.date) {
+      return a.session.date < b.session.date ? 1 : -1;
+    }
+    return b.positionSaved - a.positionSaved;
+  });
+
+  return ordered.map(function (entry) { return entry.session; });
+}
+
+function handleDeleteSessionClick(session) {
+  const confirmed = window.confirm(
+    "Delete the session from " + session.date + " (" +
+    describeSessionSection(session.sectionId) + ", " +
+    session.playerIds.length + " players)?\n\n" +
+    "It will stop counting towards future schedules. This cannot be undone."
+  );
+
+  if (!confirmed) return;
+
+  // Remove this exact session. The list on screen is sorted newest first, so
+  // its position there is not the position in storage — find the object.
+  const position = appData.history.indexOf(session);
+  if (position === -1) return;
+
+  appData.history.splice(position, 1);
+  saveData();
+
+  renderHistoryList();
+  renderHistorySummary();
+}
+
+function renderHistoryList() {
+  emptyElement(historyList);
+
+  if (appData.history.length === 0) {
+    historyList.appendChild(createElement("p", "hint",
+      "No saved sessions yet. Generate a schedule on the Session tab, then " +
+      "press \u201cSave this session\u201d underneath it."));
+    return;
+  }
+
+  for (const session of getAllSessionsNewestFirst()) {
+    const row = createElement("div", "roster-row");
+
+    const name = createElement("div", "roster-name", session.date);
+    name.appendChild(createElement("span", "tag", describeSessionSection(session.sectionId)));
+    row.appendChild(name);
+
+    const actions = createElement("div", "row-actions");
+    const deleteButton = createElement("button", "danger", "Delete");
+    deleteButton.type = "button";
+    deleteButton.addEventListener("click", function () {
+      handleDeleteSessionClick(session);
+    });
+    actions.appendChild(deleteButton);
+    row.appendChild(actions);
+
+    row.appendChild(createElement("p", "summary-line",
+      session.playerIds.length +
+      (session.playerIds.length === 1 ? " player" : " players")));
+
+    historyList.appendChild(row);
+  }
+}
+
+/**
+ * Adds up what each player has done in one section's saved sessions.
+ *
+ * Returns a map of player id to their tallies. Players who have since been
+ * deleted are kept in the tallies but skipped when we draw the list, so a
+ * removed person cannot silently distort someone else's partner counts.
+ */
+function tallySectionHistory(sectionId) {
+  const tallies = new Map();
+
+  function tallyFor(playerId) {
+    if (!tallies.has(playerId)) {
+      tallies.set(playerId, {
+        sessionsPlayed: 0,
+        roundsSatOut: 0,
+        partnerCounts: new Map()
+      });
+    }
+    return tallies.get(playerId);
+  }
+
+  for (const session of appData.history) {
+    if (session.sectionId !== sectionId) continue;
+
+    for (const playerId of session.playerIds) {
+      const tally = tallyFor(playerId);
+      tally.sessionsPlayed += 1;
+      tally.roundsSatOut += session.satOutCounts[playerId] || 0;
+    }
+
+    // Partnering is mutual, so each pair counts for both people.
+    for (const pair of session.partners) {
+      const tallyA = tallyFor(pair[0]);
+      const tallyB = tallyFor(pair[1]);
+      tallyA.partnerCounts.set(pair[1], (tallyA.partnerCounts.get(pair[1]) || 0) + 1);
+      tallyB.partnerCounts.set(pair[0], (tallyB.partnerCounts.get(pair[0]) || 0) + 1);
+    }
+  }
+
+  return tallies;
+}
+
+/** The three people someone has partnered most, as "Ana (3), Ben (2)". */
+function describeTopPartners(partnerCounts) {
+  const named = [];
+
+  for (const [partnerId, timesTogether] of partnerCounts) {
+    const partner = findPlayer(partnerId);
+    if (partner === null) continue; // no longer on the roster
+    named.push({ name: partner.name, timesTogether: timesTogether });
+  }
+
+  if (named.length === 0) return "no partners recorded yet";
+
+  // Most frequent first; ties fall back to name so the order is stable.
+  named.sort(function (a, b) {
+    if (b.timesTogether !== a.timesTogether) return b.timesTogether - a.timesTogether;
+    return a.name.localeCompare(b.name);
+  });
+
+  return named
+    .slice(0, 3)
+    .map(function (entry) { return entry.name + " (" + entry.timesTogether + ")"; })
+    .join(", ");
+}
+
+function renderHistorySummary() {
+  emptyElement(historySummary);
+
+  const sectionId = historySectionPicker.value;
+  const tallies = tallySectionHistory(sectionId);
+
+  // Only people still on the roster can be shown, since we need their name.
+  const rows = [];
+  for (const [playerId, tally] of tallies) {
+    const player = findPlayer(playerId);
+    if (player !== null) rows.push({ player: player, tally: tally });
+  }
+
+  if (rows.length === 0) {
+    historySummary.appendChild(createElement("p", "hint",
+      "Nothing saved for this section yet."));
+    return;
+  }
+
+  rows.sort(function (a, b) { return a.player.name.localeCompare(b.player.name); });
+
+  for (const row of rows) {
+    const card = createElement("div", "roster-row");
+
+    card.appendChild(createElement("div", "roster-name", row.player.name));
+
+    card.appendChild(createElement("p", "summary-line",
+      row.tally.sessionsPlayed +
+      (row.tally.sessionsPlayed === 1 ? " session" : " sessions") +
+      " \u2014 sat out " + row.tally.roundsSatOut +
+      (row.tally.roundsSatOut === 1 ? " round" : " rounds") + " in total"));
+
+    card.appendChild(createElement("p", "summary-line",
+      "Most often with: " + describeTopPartners(row.tally.partnerCounts)));
+
+    historySummary.appendChild(card);
+  }
+}
+
+historySectionPicker.addEventListener("change", renderHistorySummary);
+
+
+/* =========================================================================
+   SECTION 12 — SWITCHING SCREENS, AND STARTING UP
    ========================================================================= */
 
 const sessionScreen = document.getElementById("sessionScreen");
 const manageScreen = document.getElementById("manageScreen");
+const historyScreen = document.getElementById("historyScreen");
 const tabSession = document.getElementById("tabSession");
 const tabManage = document.getElementById("tabManage");
+const tabHistory = document.getElementById("tabHistory");
 
 function showScreen(screenName) {
-  const showingSession = screenName === "session";
+  sessionScreen.hidden = screenName !== "session";
+  manageScreen.hidden = screenName !== "manage";
+  historyScreen.hidden = screenName !== "history";
 
-  sessionScreen.hidden = !showingSession;
-  manageScreen.hidden = showingSession;
-
-  tabSession.setAttribute("aria-selected", String(showingSession));
-  tabManage.setAttribute("aria-selected", String(!showingSession));
+  tabSession.setAttribute("aria-selected", String(screenName === "session"));
+  tabManage.setAttribute("aria-selected", String(screenName === "manage"));
+  tabHistory.setAttribute("aria-selected", String(screenName === "history"));
 }
 
 tabSession.addEventListener("click", function () {
@@ -2506,6 +3240,14 @@ tabManage.addEventListener("click", function () {
   showScreen("manage");
 });
 
+tabHistory.addEventListener("click", function () {
+  // A session may have been saved, or a player renamed, since we last looked.
+  renderHistorySectionPicker();
+  renderHistoryList();
+  renderHistorySummary();
+  showScreen("history");
+});
+
 // --- First draw ---
 renderSectionPicker();
 renderAttendanceList();
@@ -2516,6 +3258,9 @@ renderRosterSectionFilter();
 renderRoster();
 renderConflictPickers();
 renderConflictList();
+renderHistorySectionPicker();
+renderHistoryList();
+renderHistorySummary();
 showScreen("session");
 </script>
 
