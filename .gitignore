@@ -1,0 +1,3 @@
+# Generated reports. Rebuild them with the build_*.py scripts, which are
+# tracked — the script is the source, the PDF is just its output.
+*.pdf
