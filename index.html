@@ -644,20 +644,36 @@ const PENALTY_SAME_COURT_IN_A_ROW = 3;    // per player stuck on same court no.
 const PENALTY_REPEAT_SINGLES     = 15;    // per repeated 1v1 matchup
 
 /*
- * TEAM BALANCE — on purpose the smallest weight here.
+ * TEAM BALANCE — DELIBERATELY OFF.
  *
- * The aim is narrow: stop the two strongest players being stacked together
- * against the two weakest. It is NOT to make every game even. Balancing by
- * skill pulls directly against playing with different people, because there
- * are only so many ways to pair a strong player with a weak one — turn this
- * up and the same strong-with-weak couples come back week after week, which
- * is the exact thing the rest of the scoring exists to prevent.
+ * The aim was narrow: stop the two strongest players being stacked together
+ * against the two weakest. It was never to make every game even. It is off
+ * because it was measured, and the measurements did not support keeping it.
  *
- * Charged per point of difference between the two teams' tier totals. Where
- * a section runs to five tiers, the worst court possible — 1+1 against 5+5 —
- * costs 16, less than two repeated partnerships.
+ * Charged per point of difference between the two teams' tier totals, on the
+ * AVERAGE court rather than the total across all of them. Every setting was
+ * tried on 8 players over 2 courts and 6 rounds, 10000 attempts a schedule:
+ *
+ *     weight   schedules with no repeated partner   top two paired per round
+ *      off                  9 in 100                        0.153
+ *      0.5                 11 in 100                        0.148
+ *      2                    8 in 100                        0.136
+ *      10                   6 in 100                        0.117
+ *      25                   0 in 100                        0.097
+ *
+ * There is no good setting. Every bit of separation between the strong pair
+ * is paid for directly in partner variety, and a weight small enough not to
+ * cost variety is a weight small enough to do nothing — at 0.5 the term was
+ * worth 2 points against a typical score of 173. Meanwhile the thing it was
+ * built to prevent, the top two partnered AGAINST the bottom two, was
+ * already happening in one round out of 360 without any of this.
+ *
+ * The skill order itself is kept: the tiers are recorded, shown and editable,
+ * and getting the ranking down is the hard part if this is ever wanted. Only
+ * the scoring is switched off, and at 0 the term short-circuits exactly like
+ * an unranked section, so no schedule is affected.
  */
-const PENALTY_TEAM_BALANCE       = 2;     // per point of tier difference
+const PENALTY_TEAM_BALANCE       = 0;     // per point of tier difference
 
 /*
  * PENALTIES THAT LOOK AT PAST SESSIONS
@@ -1026,7 +1042,15 @@ function getTierGroups(sectionId) {
   }
   if (weakestTier === 0) return [players];
 
-  const middleTier = Math.round((1 + weakestTier) / 2);
+  /*
+   * Deliberately NOT rounded. Rounding put an unranked player on the weaker
+   * side of the middle — in a section of eight, halfway is 4.5 and rounding
+   * made that a 5, so somebody nobody had judged yet was scored as slightly
+   * weak. A fractional key sorts them between the two middle tiers instead,
+   * where they become a tier of their own. That lands them on exactly the
+   * midpoint value, which is the same neutral value a guest gets.
+   */
+  const middleTier = (1 + weakestTier) / 2;
   const byTier = new Map();
 
   for (const player of players) {
@@ -1412,7 +1436,8 @@ function buildRandomSchedule(players, roundCount, roundShape) {
      +15 per repeated singles matchup
      +8  per unit of sit-out imbalance (most sat-out minus least)
      +3  each time a player is on the same court number two rounds running
-     +2  per point of tier difference between the two teams on a court
+     +0  per point of tier difference between the two teams on the average
+         court — measured, and switched off; see PENALTY_TEAM_BALANCE
 
    And the preferences that look back at saved sessions, all smaller:
      +4  x recency weight, per partner already played with
@@ -1743,8 +1768,13 @@ function buildSkillContext(players, sectionId) {
      * every court scores a flat zero. Skipping the term outright then means
      * an unordered section behaves exactly as it did before tiers existed,
      * rather than merely arriving at the same answer the slow way.
+     *
+     * A zero weight goes down the same path, so turning the dial off really
+     * does switch the work off rather than costing the same and multiplying
+     * the answer by nothing. It also keeps the tier line out of the stats,
+     * which would otherwise report a number that changed no decision.
      */
-    tierValuesDiffer: someValuesDiffer(tierValues)
+    tierValuesDiffer: PENALTY_TEAM_BALANCE > 0 && someValuesDiffer(tierValues)
   };
 }
 
@@ -1798,8 +1828,9 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext, skil
   let previousCourtOf = new Array(playerCount).fill(-1);
   let sameCourtInARow = 0;
 
-  // How lopsided the courts are, added up over the whole evening.
-  let teamImbalance = 0;
+  // How lopsided the courts are. Added up first, then averaged below.
+  let teamImbalanceTotal = 0;
+  let balancedCourtCount = 0;
 
   for (const round of schedule.rounds) {
     const currentCourtOf = new Array(playerCount).fill(-1);
@@ -1819,9 +1850,10 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext, skil
       // pairing two players of a similar standard is already what the tier
       // difference would be measuring there anyway.
       if (skillContext.tierValuesDiffer && !isSinglesCourt(court)) {
-        teamImbalance += Math.abs(
+        teamImbalanceTotal += Math.abs(
           totalTierValue(court.teamOne, skillContext.tierValues) -
           totalTierValue(court.teamTwo, skillContext.tierValues));
+        balancedCourtCount += 1;
       }
 
       for (const player of court.teamOne.concat(court.teamTwo)) {
@@ -1834,6 +1866,18 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext, skil
 
     previousCourtOf = currentCourtOf;
   }
+
+  /*
+   * Averaged per court, NOT totalled. Every other term here is charged once
+   * per thing that went wrong, so its size does not depend on how long the
+   * evening is. Team balance is different: it is charged on every court in
+   * every round, so a total would grow with the session and quietly outweigh
+   * the repeat penalties it is meant to sit below. A three-hour night should
+   * not care more about even teams than a one-hour night does.
+   */
+  const teamImbalance = balancedCourtCount === 0
+    ? 0
+    : teamImbalanceTotal / balancedCourtCount;
 
   const repeatedPartners = countRepeats(partnerCounts);
   const repeatedOpponents = countRepeats(opponentCounts);
@@ -2310,9 +2354,9 @@ function renderStats(result, layoutText) {
   // would always be zero and would only invite the question "zero what?".
   if (report.skillOrderUsed) {
     list.appendChild(createElement("li", null,
-      "Tier difference between teams totals " +
+      "Tier difference between teams averages " +
       Math.round(report.teamImbalance * 10) / 10 +
-      " across all courts (0 would be perfectly even)"));
+      " per court (0 would be perfectly even)"));
   }
 
   box.appendChild(list);
