@@ -554,9 +554,9 @@
   <div class="panel">
     <h2>Skill order</h2>
     <p class="subtitle">Rank a section strongest first. Players on the same tier
-      count as equals. This is used gently — enough to stop the two strongest
-      being put together against the two weakest, not enough to override playing
-      with different people each round.</p>
+      count as equals. Recording an order does not currently affect who plays
+      with whom: balancing teams by skill was tried and measured, and it cost
+      more in playing with different people than it was worth.</p>
 
     <div class="field">
       <label for="tierSectionPicker">Section</label>
@@ -3664,8 +3664,8 @@ function renderTierList() {
   // otherwise looks like an order that happens to be alphabetical.
   if (groups.length === 1) {
     tierList.appendChild(createElement("p", "hint",
-      "Everyone here counts as equal, so team balance is not applied to this " +
-      "section. Move somebody up or down to start ranking."));
+      "Nobody here has been ranked yet — everyone counts as equal. Move " +
+      "somebody up or down to start ranking."));
   }
 
   groups.forEach(function (group, groupIndex) {
