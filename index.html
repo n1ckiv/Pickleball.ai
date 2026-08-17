@@ -337,6 +337,15 @@
     padding: 8px 12px;
   }
 
+  /* The per-player availability dropdown, sitting alongside the buttons. */
+  .roster-row .row-actions select {
+    width: auto;
+    min-height: 44px;
+    font-size: 16px;
+    padding: 6px 8px;
+    margin: 0;
+  }
+
   /* ---------- Skill order ---------- */
   /* A heading per tier, then one row per player in it, so the groupings are
      visible at a glance rather than having to be read off numbers. */
@@ -483,7 +492,20 @@
   </div>
 
   <div class="field">
+    <label for="currentRoundPicker">Round being played now</label>
+    <select id="currentRoundPicker"></select>
+    <p class="hint">Set this as the evening goes on. Earlier rounds count as
+      played, and &ldquo;Regenerate from here&rdquo; leaves them alone.</p>
+  </div>
+
+  <div class="field">
     <button id="generateButton" type="button">Generate schedule</button>
+  </div>
+
+  <div class="field">
+    <button class="secondary" id="regenerateButton" type="button" disabled>Regenerate from here</button>
+    <p class="hint">Keeps the rounds already played exactly as they are and
+      rebuilds only the rest, around whoever is here now.</p>
   </div>
 
   <div id="messages"></div>
@@ -945,11 +967,38 @@ function cleanUpHistorySession(rawSession) {
     }
   }
 
+  /*
+   * How much court time each person actually got. Recorded separately from
+   * satOutCounts because the two answer different questions: satOutCounts is
+   * capped at one per night and exists to steer future schedules, while this
+   * is the honest figure the History tab shows the coordinator. Someone who
+   * arrives for the last two rounds of five has satOutCounts 1 and
+   * roundsPlayed 2, and both of those are the right answer to their question.
+   *
+   * Sessions saved before this existed simply have no entry, and the History
+   * tab falls back to not claiming a figure it does not have.
+   */
+  const roundsPlayed = {};
+  if (rawSession.roundsPlayed && typeof rawSession.roundsPlayed === "object") {
+    for (const playerId of Object.keys(rawSession.roundsPlayed)) {
+      const count = rawSession.roundsPlayed[playerId];
+      if (!wasPresent.has(playerId)) continue;
+      if (Number.isFinite(count) && count >= 0) roundsPlayed[playerId] = count;
+    }
+  }
+
+  const roundsInSession = Number.isFinite(rawSession.roundsInSession) &&
+                          rawSession.roundsInSession > 0
+    ? rawSession.roundsInSession
+    : null;
+
   return {
     date: rawSession.date,
     sectionId: rawSession.sectionId,
     playerIds: playerIds,
     satOutCounts: satOutCounts,
+    roundsPlayed: roundsPlayed,
+    roundsInSession: roundsInSession,
     partners:  cleanUpPairList(rawSession.partners),
     opponents: cleanUpPairList(rawSession.opponents),
     singles:   cleanUpPairList(rawSession.singles)
@@ -1189,6 +1238,157 @@ let borrowedPlayerIds = new Set();
 let guests = [];
 let nextGuestNumber = 1;
 
+/* ---------- Who is here, round by round ---------- */
+
+/**
+ * WHO IS AVAILABLE, ROUND BY ROUND — also memory only.
+ *
+ * Maps a player id to the set of round numbers they are NOT available for.
+ * An empty set, or no entry at all, means "here all night", which is what
+ * almost everybody is, so the common case costs nothing to record.
+ *
+ * One set covers every case the coordinator has to describe: arriving late is
+ * the early rounds, leaving early is the late ones, and stepping away for a
+ * round in the middle is a hole. Storing an arrival round and a departure
+ * round instead would need a third field for the hole, and three fields that
+ * can disagree with each other is three chances to get it wrong.
+ *
+ * Round numbers here are 1-based, as the coordinator sees them.
+ */
+let unavailableRoundsByPlayerId = new Map();
+
+/**
+ * Which round is being played right now. The coordinator sets it; nothing
+ * works it out from a clock. Rounds before this one are finished, and
+ * "Regenerate from here" leaves them exactly as they are.
+ */
+let currentRound = 1;
+
+/** The unavailable-rounds set for a player, created on first use. */
+function getUnavailableRounds(playerId) {
+  if (!unavailableRoundsByPlayerId.has(playerId)) {
+    unavailableRoundsByPlayerId.set(playerId, new Set());
+  }
+  return unavailableRoundsByPlayerId.get(playerId);
+}
+
+/** Is this player on hand to play in this round? */
+function isPlayerAvailable(playerId, roundNumber) {
+  const unavailable = unavailableRoundsByPlayerId.get(playerId);
+  return unavailable === undefined || !unavailable.has(roundNumber);
+}
+
+/** Marks a run of rounds, inclusive, as one the player cannot play. */
+function markRoundsUnavailable(playerId, firstRound, lastRound) {
+  const unavailable = getUnavailableRounds(playerId);
+  for (let round = firstRound; round <= lastRound; round++) {
+    unavailable.add(round);
+  }
+}
+
+/** The opposite: hands a run of rounds back to the player. */
+function markRoundsAvailable(playerId, firstRound, lastRound) {
+  const unavailable = unavailableRoundsByPlayerId.get(playerId);
+  if (unavailable === undefined) return;
+  for (let round = firstRound; round <= lastRound; round++) {
+    unavailable.delete(round);
+  }
+}
+
+/** Here for the whole evening — clears anything previously recorded. */
+function setAvailableAllNight(playerId, roundCount) {
+  markRoundsAvailable(playerId, 1, roundCount);
+}
+
+/**
+ * Turns up at this round and stays. Used both for "she's running late"
+ * before the evening starts and for the ARRIVED button once she walks in.
+ */
+function setArrivesAtRound(playerId, arrivalRound, roundCount) {
+  markRoundsAvailable(playerId, 1, roundCount);
+  markRoundsUnavailable(playerId, 1, arrivalRound - 1);
+}
+
+/**
+ * Plays up to and including this round, then goes. Used both for "he has to
+ * leave at nine" beforehand and for the DEPARTED button on the night.
+ */
+function setLeavesAfterRound(playerId, lastRound, roundCount) {
+  markRoundsAvailable(playerId, 1, roundCount);
+  markRoundsUnavailable(playerId, lastRound + 1, roundCount);
+}
+
+/**
+ * Steps away from the next round onwards, keeping whatever else was already
+ * recorded. This is the one case a single arrival or departure cannot say,
+ * because the player may well come back later.
+ */
+function setStepsAwayFromNextRound(playerId, roundCount) {
+  markRoundsUnavailable(playerId, currentRound + 1, roundCount);
+}
+
+/** And back again, from the next round onwards. */
+function setBackFromNextRound(playerId, roundCount) {
+  markRoundsAvailable(playerId, currentRound + 1, roundCount);
+}
+
+/**
+ * How long the evening was when availability was last recorded. Needed only
+ * so we can tell a longer evening from a shorter one when the number changes.
+ */
+let roundCountLastSeen = null;
+
+/**
+ * Keeps availability honest when the evening grows or shrinks.
+ *
+ * Absence is stored as a set of round numbers, so "leaves after round 2" of a
+ * five-round night is the set {3, 4, 5}. That set says nothing about rounds 6
+ * and 7, so stretching the night to seven rounds would quietly put a player
+ * who has gone home back on court at the end. A run of absence that reaches
+ * the old last round is therefore extended to the new one, and rounds that no
+ * longer exist are dropped so they cannot come back if the night grows again.
+ */
+function stretchAvailabilityToRoundCount(previousRoundCount, roundCount) {
+  if (previousRoundCount === null || previousRoundCount === roundCount) return;
+
+  for (const playerId of unavailableRoundsByPlayerId.keys()) {
+    const unavailable = unavailableRoundsByPlayerId.get(playerId);
+
+    if (roundCount > previousRoundCount) {
+      if (unavailable.has(previousRoundCount)) {
+        markRoundsUnavailable(playerId, previousRoundCount + 1, roundCount);
+      }
+    } else {
+      for (const round of Array.from(unavailable)) {
+        if (round > roundCount) unavailable.delete(round);
+      }
+    }
+  }
+}
+
+/**
+ * Puts a player's availability into words for the tick list, e.g.
+ * "rounds 3-5" or "rounds 1, 2, 4". Returns null when they are here all
+ * night, so the common case adds no clutter to the screen.
+ */
+function describeAvailability(playerId, roundCount) {
+  const playing = [];
+  for (let round = 1; round <= roundCount; round++) {
+    if (isPlayerAvailable(playerId, round)) playing.push(round);
+  }
+
+  if (playing.length === roundCount) return null;
+  if (playing.length === 0) return "not playing at all";
+
+  // A single unbroken run reads far better as a range than as a list.
+  const isUnbroken = playing[playing.length - 1] - playing[0] === playing.length - 1;
+  if (isUnbroken && playing.length > 1) {
+    return "rounds " + playing[0] + "\u2013" + playing[playing.length - 1];
+  }
+
+  return (playing.length === 1 ? "round " : "rounds ") + playing.join(", ");
+}
+
 /**
  * Collects the ticked players and puts them in the shape the generator wants.
  *
@@ -1251,8 +1451,9 @@ function readNumberInput(elementId, fallbackValue) {
    SECTION 2 — WORKING OUT THE SHAPE OF A ROUND
 
    Before we can place anyone, we need to know how many courts will run and
-   how big each one is. This is the same for every round, so we only do it
-   once per schedule.
+   how big each one is. This is worked out separately for every round, because
+   the number of people standing there can change: someone arrives at round
+   three, someone else leaves after round four.
    ========================================================================= */
 
 /**
@@ -1335,6 +1536,78 @@ function describeLayout(roundShape, playersPerCourt) {
   return parts.join(", ");
 }
 
+/**
+ * Works out the whole evening: which rounds are already played and fixed,
+ * and for each round still to build, who is there and what shape it takes.
+ *
+ * `lockedRounds` are rounds the coordinator has already run. They are passed
+ * straight through, the same objects, never rebuilt — that is what makes
+ * "regenerate from here" leave the night so far untouched.
+ *
+ * THE IMPORTANT CONSEQUENCE is in planRoundShape being called per round with
+ * the number of people actually present. Eighteen expected on four courts
+ * seats sixteen and benches two; if two are late, sixteen are present, four
+ * doubles courts seat all of them and NOBODY is benched. The absence has
+ * absorbed the bench places on its own, with no special case to say so.
+ */
+function planSession(players, roundCount, courtCount, playersPerCourt, lockedRounds) {
+  const rounds = [];
+
+  for (let roundNumber = lockedRounds.length + 1; roundNumber <= roundCount; roundNumber++) {
+    const available = [];
+    const absent = [];
+
+    for (const player of players) {
+      if (isPlayerAvailable(player.id, roundNumber)) {
+        available.push(player);
+      } else {
+        absent.push(player);
+      }
+    }
+
+    rounds.push({
+      roundNumber: roundNumber,
+      available: available,
+      absent: absent,
+      shape: planRoundShape(available.length, courtCount, playersPerCourt)
+    });
+  }
+
+  return { roundCount: roundCount, lockedRounds: lockedRounds, rounds: rounds };
+}
+
+/**
+ * Describes the layout of the rounds we are about to build. Usually every
+ * round is the same and one line says it; when people come and go the rounds
+ * differ and each one is worth naming.
+ *
+ * It names its own scope, because after a regeneration this covers only the
+ * rounds that were rebuilt. Saying "each round" there would be describing the
+ * played rounds too, and they may well have had a different shape.
+ */
+function describeSessionLayout(sessionPlan, playersPerCourt) {
+  if (sessionPlan.rounds.length === 0) return "Nothing left to build";
+
+  const scope = sessionPlan.lockedRounds.length === 0
+    ? "Layout each round: "
+    : "Layout from round " + sessionPlan.rounds[0].roundNumber + ": ";
+
+  const descriptions = sessionPlan.rounds.map(function (round) {
+    return describeLayout(round.shape, playersPerCourt);
+  });
+
+  const allTheSame = descriptions.every(function (text) {
+    return text === descriptions[0];
+  });
+  if (allTheSame) return scope + descriptions[0];
+
+  return scope + sessionPlan.rounds
+    .map(function (round, position) {
+      return "round " + round.roundNumber + " " + descriptions[position];
+    })
+    .join("; ");
+}
+
 
 /* =========================================================================
    SECTION 3 — BUILDING ONE RANDOM SCHEDULE
@@ -1358,6 +1631,12 @@ function shuffleArray(items) {
  * We always choose from the players who have sat out the fewest times so
  * far, breaking ties at random. That guarantees nobody sits twice before
  * everyone has sat once, while still giving the random search real variety.
+ *
+ * `players` is whoever is actually here this round, and the tally counts
+ * rounds missed for any reason at all. Between them those two facts give the
+ * rule its teeth: a player who arrived at round three already has a tally of
+ * two, so while anybody still has none she cannot be picked again. Nothing
+ * here needs to know WHY she missed them.
  */
 function chooseSitOuts(players, sitOutTally, howMany) {
   if (howMany <= 0) return [];
@@ -1388,37 +1667,104 @@ function splitIntoTeams(courtPlayers) {
   };
 }
 
+/** Everyone on a court in this round, both teams, all courts. */
+function listPlayersOnCourt(round) {
+  const onCourt = [];
+  for (const court of round.courts) {
+    for (const player of court.teamOne) onCourt.push(player);
+    for (const player of court.teamTwo) onCourt.push(player);
+  }
+  return onCourt;
+}
+
 /**
  * Builds one complete, valid schedule at random.
  * "Valid" means court sizes and sit-out counts are correct — it says
  * nothing about quality. Quality is what the scoring function measures.
+ *
+ * TWO TALLIES COME BACK, and the difference between them is the whole idea:
+ *
+ *   sitOutTally  — rounds a player was not on court, FOR ANY REASON. Benched,
+ *                  late, gone home, stepped outside: all the same. It measures
+ *                  court time, not fault. This is what decides who is picked
+ *                  next, so missing a round protects you from being benched
+ *                  later, exactly as a benched round does.
+ *
+ *   benchedTally — rounds where the player was standing there and the
+ *                  generator chose to sit them down. This is the only figure
+ *                  the generator is answerable for, so it is what the sit-out
+ *                  RULE is judged on. Someone benched in round two who then
+ *                  goes home after round three has missed rounds two, four and
+ *                  five, but was only benched once, and nothing has gone wrong.
  */
-function buildRandomSchedule(players, roundCount, roundShape) {
+function buildRandomSchedule(players, sessionPlan) {
   const sitOutTally = players.map(function () { return 0; });
+  const benchedTally = players.map(function () { return 0; });
   const rounds = [];
 
-  for (let roundNumber = 0; roundNumber < roundCount; roundNumber++) {
-    const sitOuts = chooseSitOuts(players, sitOutTally, roundShape.sitOutCount);
+  /*
+   * Rounds that have already been played. They go in untouched — same objects,
+   * not copies — but they still count towards both tallies, so the rounds we
+   * build next know who has already had a turn on the bench.
+   *
+   * Court time is read from who is ON COURT rather than from the round's
+   * sit-out list, because a player added part-way through the evening was
+   * never in the earlier rounds' lists at all, yet plainly did not play them.
+   */
+  for (const round of sessionPlan.lockedRounds) {
+    rounds.push(round);
 
-    // Everyone not sitting out is available, in random order.
+    const playedThisRound = new Set(listPlayersOnCourt(round).map(function (p) {
+      return p.index;
+    }));
+    for (const player of players) {
+      if (!playedThisRound.has(player.index)) sitOutTally[player.index] += 1;
+    }
+    for (const player of round.sitOuts) {
+      benchedTally[player.index] += 1;
+    }
+  }
+
+  /*
+   * Absences from the rounds still to come are counted BEFORE any bench is
+   * picked, not as each round is reached. Somebody known to be leaving after
+   * round 1 of 5 has already missed four rounds as far as court time goes, so
+   * they must not also be chosen for the bench in round 1 — the coordinator
+   * told us in advance precisely so the evening could be planned around it.
+   * Counting them round by round would make the first round look like a clean
+   * slate and let the search bench the very person about to walk out.
+   */
+  for (const plan of sessionPlan.rounds) {
+    for (const player of plan.absent) {
+      sitOutTally[player.index] += 1;
+    }
+  }
+
+  for (const plan of sessionPlan.rounds) {
+    // chooseSitOuts adds to sitOutTally itself; these are the ones we chose.
+    const sitOuts = chooseSitOuts(plan.available, sitOutTally, plan.shape.sitOutCount);
+    for (const player of sitOuts) {
+      benchedTally[player.index] += 1;
+    }
+
     const sittingOutIndexes = new Set(sitOuts.map(function (p) { return p.index; }));
-    const available = shuffleArray(players.filter(function (p) {
+    const playing = shuffleArray(plan.available.filter(function (p) {
       return !sittingOutIndexes.has(p.index);
     }));
 
     // Deal the shuffled players into the courts, in order.
     const courts = [];
     let nextPlayer = 0;
-    for (const size of roundShape.courtSizes) {
-      const courtPlayers = available.slice(nextPlayer, nextPlayer + size);
+    for (const size of plan.shape.courtSizes) {
+      const courtPlayers = playing.slice(nextPlayer, nextPlayer + size);
       nextPlayer += size;
       courts.push(splitIntoTeams(courtPlayers));
     }
 
-    rounds.push({ courts: courts, sitOuts: sitOuts });
+    rounds.push({ courts: courts, sitOuts: sitOuts, absent: plan.absent });
   }
 
-  return { rounds: rounds, sitOutTally: sitOutTally };
+  return { rounds: rounds, sitOutTally: sitOutTally, benchedTally: benchedTally };
 }
 
 
@@ -1548,27 +1894,38 @@ function fairMaximumSitOuts(sitOutTally) {
  * Cheap enough for the inner loop: the scorer only needs to know how badly a
  * candidate breaks the rule, not who by. findSitOutRuleBreaches does the
  * naming afterwards, once, for the schedule that actually won.
+ *
+ * Counts BENCHED rounds, not missed ones. The rule is a promise about what
+ * the generator will do to people who turned up, and it cannot promise
+ * anything about who goes home early.
  */
-function countSitOutRuleBreaches(sitOutTally) {
-  const ceiling = fairMaximumSitOuts(sitOutTally);
+function countSitOutRuleBreaches(benchedTally) {
+  const ceiling = fairMaximumSitOuts(benchedTally);
 
   let breaches = 0;
-  for (const timesSatOut of sitOutTally) {
-    if (timesSatOut > ceiling) breaches += timesSatOut - ceiling;
+  for (const timesBenched of benchedTally) {
+    if (timesBenched > ceiling) breaches += timesBenched - ceiling;
   }
   return breaches;
 }
 
 /**
- * Names who sat out too often and in which rounds, for the warning.
+ * Names who was benched too often and in which rounds, for the warning.
  *
  * Note this reports a broken RULE, not an unlucky night. Sitting twice when
  * there are more sit-out slots than players is expected and not a breach —
  * the ceiling rises with the least-benched player. See checkSitOutOverflow,
  * which warns about that case up front instead.
+ *
+ * A night that turned out badly for somebody is also not a breach. If she was
+ * benched in round two and then unexpectedly went home after round three she
+ * has missed three of the five rounds, but the schedule was right when it was
+ * made and the world changed afterwards. The warning is about schedules the
+ * generator built in violation of its own rule, which is why it reads the
+ * benched tally and not the missed one.
  */
 function findSitOutRuleBreaches(schedule, players) {
-  const ceiling = fairMaximumSitOuts(schedule.sitOutTally);
+  const ceiling = fairMaximumSitOuts(schedule.benchedTally);
 
   const roundsSatOutBy = new Map();
   schedule.rounds.forEach(function (round, roundIndex) {
@@ -1580,7 +1937,7 @@ function findSitOutRuleBreaches(schedule, players) {
 
   const breaches = [];
   for (const player of players) {
-    const timesSatOut = schedule.sitOutTally[player.index];
+    const timesSatOut = schedule.benchedTally[player.index];
     if (timesSatOut <= ceiling) continue;
 
     breaches.push({
@@ -1884,10 +2241,20 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext, skil
   const repeatedSingles = countRepeats(singlesCounts);
   const conflictViolations = findConflictViolations(schedule, conflictKeys).length;
 
+  /*
+   * Court time is what we report; benching is what we charge for.
+   *
+   * The penalty has to be measured on the benched tally, because otherwise a
+   * player who is absent all evening pins the spread at the number of rounds
+   * and the term returns the same figure for every candidate — present, but
+   * no longer able to tell a good schedule from a bad one. Fairness in the
+   * face of absence is already handled where it belongs, in chooseSitOuts.
+   */
   const mostSitOuts = Math.max.apply(null, schedule.sitOutTally);
   const leastSitOuts = Math.min.apply(null, schedule.sitOutTally);
-  const sitOutImbalance = mostSitOuts - leastSitOuts;
-  const sitOutRuleBreaches = countSitOutRuleBreaches(schedule.sitOutTally);
+  const sitOutImbalance = Math.max.apply(null, schedule.benchedTally) -
+                          Math.min.apply(null, schedule.benchedTally);
+  const sitOutRuleBreaches = countSitOutRuleBreaches(schedule.benchedTally);
 
   // --- How much of tonight is a rerun of previous weeks? ---
   const historyPartnerWeight = weighAgainstHistory(partnerCounts, historyContext.partnerWeights);
@@ -1951,6 +2318,7 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext, skil
     skillOrderUsed: skillContext.tierValuesDiffer,
     mostSitOuts: mostSitOuts,
     leastSitOuts: leastSitOuts,
+    mostBenched: Math.max.apply(null, schedule.benchedTally),
     historyPartnerWeight: historyPartnerWeight,
     historyOpponentWeight: historyOpponentWeight,
     sitOutRateSpread: sitOutRateSpread,
@@ -1965,7 +2333,7 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext, skil
    Build ATTEMPT_COUNT random schedules, score each one, keep the best.
    ========================================================================= */
 
-function findBestSchedule(players, roundCount, roundShape, conflictKeys, historyContext, skillContext) {
+function findBestSchedule(players, sessionPlan, conflictKeys, historyContext, skillContext) {
   const startTime = performance.now();
 
   // Callers without any history or skill order still get valid, empty ones.
@@ -1975,8 +2343,14 @@ function findBestSchedule(players, roundCount, roundShape, conflictKeys, history
   let bestSchedule = null;
   let bestReport = null;
 
+  /*
+   * Every candidate contains the already-played rounds as well as the new
+   * ones, and is scored whole. That is deliberate: partners and opponents
+   * from earlier in the evening have to weigh on what comes next, or the
+   * second half of the night would happily repeat the first half.
+   */
   for (let attempt = 0; attempt < ATTEMPT_COUNT; attempt++) {
-    const candidate = buildRandomSchedule(players, roundCount, roundShape);
+    const candidate = buildRandomSchedule(players, sessionPlan);
     const report = scoreSchedule(candidate, players.length, conflictKeys, history, skill);
 
     if (bestReport === null || report.score < bestReport.score) {
@@ -2025,10 +2399,18 @@ function checkFeasibility(playerCount, roundCount, playersPerCourt) {
  * the players, somebody has to take a second one — no schedule can avoid it,
  * so we say so before generating rather than looking as though it went wrong.
  *
+ * Rounds can now have different shapes, so the slots are added up round by
+ * round rather than multiplied out. A round where everybody present gets a
+ * court contributes nothing, which is the point: absences soak up bench
+ * places, and an evening with a few late arrivals may not overflow at all.
+ *
  * Returns null when the rule holds comfortably.
  */
-function checkSitOutOverflow(playerCount, roundCount, roundShape) {
-  const sitOutSlots = roundCount * roundShape.sitOutCount;
+function checkSitOutOverflow(playerCount, sessionPlan) {
+  let sitOutSlots = 0;
+  for (const round of sessionPlan.rounds) sitOutSlots += round.shape.sitOutCount;
+  for (const round of sessionPlan.lockedRounds) sitOutSlots += round.sitOuts.length;
+
   if (sitOutSlots <= playerCount) return null;
 
   // Spread as evenly as possible, this is how often the unlucky ones sit.
@@ -2240,8 +2622,10 @@ function clearScreen() {
   emptyElement(messagesElement);
   emptyElement(resultsElement);
 
-  // Whatever was on screen is gone, so there is nothing left to save.
+  // Whatever was on screen is gone, so there is nothing left to save, and
+  // nothing to regenerate the second half of either.
   lastGeneratedSession = null;
+  updateRegenerateButton();
 }
 
 /** Puts a coloured message box inside the given container. */
@@ -2323,7 +2707,7 @@ function renderStats(result, layoutText) {
   const box = createElement("div", "stats");
 
   box.appendChild(createElement("h3", null, "Result"));
-  box.appendChild(createElement("p", null, "Layout each round: " + layoutText + "."));
+  box.appendChild(createElement("p", null, layoutText + "."));
   box.appendChild(createElement("p", null,
     // History weights are fractions, so the total can be, too. One decimal
     // place is plenty — the number is only meaningful next to another score.
@@ -2343,8 +2727,11 @@ function renderStats(result, layoutText) {
     report.repeatedSingles + " repeated singles " +
     (report.repeatedSingles === 1 ? "matchup" : "matchups")));
   list.appendChild(createElement("li", null,
-    "Sit-outs range from " + report.leastSitOuts + " to " + report.mostSitOuts +
-    " per player (imbalance of " + report.sitOutImbalance + ")"));
+    "Rounds off court range from " + report.leastSitOuts + " to " +
+    report.mostSitOuts + " per player, counting anyone who was away"));
+  list.appendChild(createElement("li", null,
+    "Of those, the most anyone here was benched is " + report.mostBenched +
+    " (imbalance of " + report.sitOutImbalance + ")"));
   list.appendChild(createElement("li", null,
     report.sameCourtInARow + " " +
     (report.sameCourtInARow === 1 ? "time a player stays" : "times a player stays") +
@@ -2488,10 +2875,20 @@ function renderCourt(court, courtNumber) {
   return card;
 }
 
-/** Draws one round card: all its courts, plus who is sitting out. */
-function renderRound(round, roundNumber) {
+/**
+ * Draws one round card: all its courts, plus who is sitting out.
+ *
+ * The bench and the missing are shown on separate lines even though the
+ * scheduler treats them identically. It has to, because it is measuring court
+ * time; the coordinator is reading names out loud, and there is no point
+ * calling somebody to the bench who is not in the building.
+ */
+function renderRound(round, roundNumber, isCompleted) {
   const card = createElement("div", "round-card");
-  card.appendChild(createElement("h2", null, "Round " + (roundNumber + 1)));
+
+  const heading = createElement("h2", null, "Round " + (roundNumber + 1));
+  if (isCompleted) heading.appendChild(createElement("span", "tag", "PLAYED"));
+  card.appendChild(heading);
 
   const grid = createElement("div", "court-grid");
   round.courts.forEach(function (court, courtNumber) {
@@ -2501,19 +2898,26 @@ function renderRound(round, roundNumber) {
 
   const sitOutLine = createElement("p", "sit-outs");
   if (round.sitOuts.length === 0) {
-    sitOutLine.textContent = "Sitting out: nobody — everyone plays this round.";
+    sitOutLine.textContent = "Sitting out: nobody \u2014 everyone here plays this round.";
   } else {
     sitOutLine.textContent = "Sitting out: " +
       round.sitOuts.map(function (p) { return p.name; }).join(", ");
   }
   card.appendChild(sitOutLine);
 
+  const absent = round.absent || [];
+  if (absent.length > 0) {
+    card.appendChild(createElement("p", "sit-outs",
+      "Not here: " + absent.map(function (p) { return p.name; }).join(", ")));
+  }
+
   return card;
 }
 
-function renderSchedule(schedule) {
+function renderSchedule(schedule, completedRoundCount) {
   schedule.rounds.forEach(function (round, roundNumber) {
-    resultsElement.appendChild(renderRound(round, roundNumber));
+    resultsElement.appendChild(
+      renderRound(round, roundNumber, roundNumber < completedRoundCount));
   });
 }
 
@@ -2568,15 +2972,171 @@ function updateAttendanceCount() {
     return;
   }
 
+  // Ticked but marked away for every round is not the same as playing, and
+  // the line would otherwise promise court time to someone who gets none.
+  const roundCount = getRoundCount();
+  const awayAllNight = getSelectedPlayers().filter(function (player) {
+    return describeAvailability(player.id, roundCount) === "not playing at all";
+  }).length;
+
   let line = ticked + " of " + total + " in this section";
   if (extras.length > 0) line += ", plus " + extras.join(" and ");
-  line += " \u2014 " + playingNow + " playing";
+  line += " \u2014 " + (playingNow - awayAllNight) + " playing";
+  if (awayAllNight > 0) line += ", " + awayAllNight + " away all night";
 
   attendanceCount.textContent = line;
 }
 
+/* ---------- Availability: who is here for which rounds ---------- */
+
+/** How many rounds the evening is set to run, as the boxes currently say. */
+function getRoundCount() {
+  return readNumberInput("numRounds", 5);
+}
+
+/**
+ * Works out which dropdown entry matches what is currently recorded for a
+ * player, so the control opens showing the truth rather than a default.
+ *
+ * The dropdown only offers whole-night plans — here throughout, arriving at a
+ * round, leaving after one. Anything more broken up than that (stepped out for
+ * one round and came back) gets its own entry spelled out in full, because
+ * there is no sensible plan name for it.
+ */
+function matchAvailabilityToChoice(playerId, roundCount) {
+  const playing = [];
+  for (let round = 1; round <= roundCount; round++) {
+    if (isPlayerAvailable(playerId, round)) playing.push(round);
+  }
+
+  if (playing.length === roundCount) return "all";
+  if (playing.length === 0) return "custom";
+
+  const first = playing[0];
+  const last = playing[playing.length - 1];
+  const isUnbroken = last - first === playing.length - 1;
+  if (!isUnbroken) return "custom";
+
+  if (first === 1) return "leave:" + last;
+  if (last === roundCount) return "arrive:" + first;
+  return "custom";
+}
+
+/**
+ * The dropdown that says when a player is here. Used in all three lists —
+ * the section, borrowed players and guests — because a walk-in is every bit
+ * as likely to turn up halfway through as anybody else.
+ */
+function createAvailabilitySelect(playerId) {
+  const roundCount = getRoundCount();
+  const select = document.createElement("select");
+
+  function addChoice(value, label) {
+    const option = createElement("option", null, label);
+    option.value = value;
+    select.appendChild(option);
+  }
+
+  addChoice("all", "All rounds");
+  for (let round = 2; round <= roundCount; round++) {
+    addChoice("arrive:" + round, "From round " + round);
+  }
+  for (let round = 1; round < roundCount; round++) {
+    addChoice("leave:" + round, "Until round " + round);
+  }
+
+  const chosen = matchAvailabilityToChoice(playerId, roundCount);
+  if (chosen === "custom") {
+    addChoice("custom", describeAvailability(playerId, roundCount) || "All rounds");
+  }
+  select.value = chosen;
+
+  select.addEventListener("change", function () {
+    const value = select.value;
+    if (value === "all") {
+      setAvailableAllNight(playerId, roundCount);
+    } else if (value.indexOf("arrive:") === 0) {
+      setArrivesAtRound(playerId, parseInt(value.slice(7), 10), roundCount);
+    } else if (value.indexOf("leave:") === 0) {
+      setLeavesAfterRound(playerId, parseInt(value.slice(6), 10), roundCount);
+    }
+    refreshAvailabilityControls();
+  });
+
+  return select;
+}
+
+/**
+ * The one button that covers arriving, departing and stepping away.
+ *
+ * All four things the coordinator needs on the night are the same operation —
+ * change this player from the NEXT round onwards — so they are one control
+ * whose label says which direction it will go. There is nothing to press once
+ * the last round is under way, so it switches itself off.
+ */
+function createAvailabilityButton(playerId) {
+  const roundCount = getRoundCount();
+  const nextRound = currentRound + 1;
+  const willBeHere = isPlayerAvailable(playerId, nextRound);
+
+  const button = createElement("button", "secondary",
+    nextRound > roundCount
+      ? "Last round"
+      : (willBeHere ? "Out from " + nextRound : "In from " + nextRound));
+  button.type = "button";
+  button.disabled = nextRound > roundCount;
+
+  button.addEventListener("click", function () {
+    if (willBeHere) {
+      setStepsAwayFromNextRound(playerId, roundCount);
+    } else {
+      setBackFromNextRound(playerId, roundCount);
+    }
+    refreshAvailabilityControls();
+  });
+
+  return button;
+}
+
+/** The dropdown and button pair, wrapped so they sit at the end of a row. */
+function createAvailabilityControls(playerId) {
+  const actions = createElement("div", "row-actions");
+  actions.appendChild(createAvailabilitySelect(playerId));
+  actions.appendChild(createAvailabilityButton(playerId));
+  return actions;
+}
+
+/**
+ * Redraws every list that shows availability.
+ *
+ * Changing the round count or the current round changes what all of these
+ * controls should offer, and a player can appear in more than one list, so
+ * they are all rebuilt together rather than patched individually.
+ */
+function refreshAvailabilityControls() {
+  renderAttendanceList();
+  renderOtherSectionList();
+  renderGuestList();
+}
+
+/**
+ * The section the tick list was last drawn for. Redrawing the SAME section
+ * has to keep the ticks — availability controls redraw the list constantly,
+ * and losing everyone's attendance each time would be maddening. Drawing a
+ * DIFFERENT section is a fresh evening, so it starts with everyone ticked.
+ */
+let attendanceListSectionId = null;
+
 /** Draws the tick list for whichever section is chosen. Everyone starts ticked. */
 function renderAttendanceList() {
+  const isSameSection = attendanceListSectionId === sectionPicker.value;
+  attendanceListSectionId = sectionPicker.value;
+
+  const wasTicked = new Set();
+  attendanceList.querySelectorAll("input[type='checkbox']").forEach(function (box) {
+    if (box.checked) wasTicked.add(box.value);
+  });
+
   emptyElement(attendanceList);
 
   const players = getPlayersInSection(sectionPicker.value);
@@ -2589,20 +3149,26 @@ function renderAttendanceList() {
     return;
   }
 
-  const list = createElement("div", "check-list");
+  const list = createElement("div");
 
   for (const player of players) {
-    // The <label> wraps the box, so tapping anywhere on the row toggles it.
-    const row = createElement("label", "check-row");
+    const row = createElement("div", "roster-row");
+
+    // The <label> wraps the box, so tapping the name toggles it. It stops
+    // short of the dropdown, which would otherwise untick people by accident.
+    const tick = createElement("label", "check-row");
 
     const box = document.createElement("input");
     box.type = "checkbox";
     box.value = player.id;
-    box.checked = true; // default: assume everyone showed up
+    box.checked = isSameSection ? wasTicked.has(player.id) : true;
     box.addEventListener("change", updateAttendanceCount);
 
-    row.appendChild(box);
-    row.appendChild(createElement("span", null, player.name));
+    tick.appendChild(box);
+    tick.appendChild(createElement("span", null, player.name));
+    row.appendChild(tick);
+    row.appendChild(createAvailabilityControls(player.id));
+
     list.appendChild(row);
   }
 
@@ -2670,10 +3236,11 @@ function renderOtherSectionList() {
     return;
   }
 
-  const list = createElement("div", "check-list scroll-list");
+  const list = createElement("div", "scroll-list");
 
   for (const player of matching) {
-    const row = createElement("label", "check-row");
+    const row = createElement("div", "roster-row");
+    const tick = createElement("label", "check-row");
 
     const box = document.createElement("input");
     box.type = "checkbox";
@@ -2694,8 +3261,10 @@ function renderOtherSectionList() {
     nameCell.appendChild(document.createTextNode(player.name));
     nameCell.appendChild(createElement("span", "section-label", describePlayerSections(player)));
 
-    row.appendChild(box);
-    row.appendChild(nameCell);
+    tick.appendChild(box);
+    tick.appendChild(nameCell);
+    row.appendChild(tick);
+    row.appendChild(createAvailabilityControls(player.id));
     list.appendChild(row);
   }
 
@@ -2736,6 +3305,7 @@ function renderGuestList() {
     label.appendChild(box);
     label.appendChild(nameCell);
     row.appendChild(label);
+    row.appendChild(createAvailabilityControls(guest.id));
 
     const actions = createElement("div", "row-actions");
     const removeButton = createElement("button", "secondary", "Remove");
@@ -2859,9 +3429,29 @@ function buildHistoryEntry(generated) {
     return findPlayer(player.id) !== null; // guests excluded
   });
 
+  const roundsInSession = generated.schedule.rounds.length;
+
+  /*
+   * TWO FIGURES, ON PURPOSE.
+   *
+   * roundsPlayed is the truth, and it is what the History tab shows: turned
+   * up for the last two rounds of five, played two of five.
+   *
+   * satOutCounts is what steers future schedules, and it is CAPPED AT ONE.
+   * Without the cap, somebody who arrived an hour late would go into the
+   * record as owed four rounds of court time and quietly be protected from
+   * the bench for weeks. Being late is not a debt the club owes you. One is
+   * enough to say "she did miss out", which is all the next schedule needs.
+   *
+   * On an ordinary night the cap changes nothing, because the sit-out rule
+   * already holds everyone to at most one.
+   */
   const satOutCounts = {};
+  const roundsPlayed = {};
   for (const player of rosterPlayers) {
-    satOutCounts[player.id] = generated.schedule.sitOutTally[player.index];
+    const roundsMissed = generated.schedule.sitOutTally[player.index];
+    satOutCounts[player.id] = Math.min(roundsMissed, 1);
+    roundsPlayed[player.id] = roundsInSession - roundsMissed;
   }
 
   const pairs = collectSessionPairs(generated.schedule);
@@ -2871,6 +3461,8 @@ function buildHistoryEntry(generated) {
     sectionId: generated.sectionId,
     playerIds: rosterPlayers.map(function (player) { return player.id; }),
     satOutCounts: satOutCounts,
+    roundsPlayed: roundsPlayed,
+    roundsInSession: roundsInSession,
     partners: pairs.partners,
     opponents: pairs.opponents,
     singles: pairs.singles
@@ -2921,12 +3513,17 @@ function handleSaveSessionClick() {
     " Future schedules for this section will take it into account.", "success");
 }
 
-function handleGenerateClick() {
+/**
+ * The whole of Generate, and the whole of Regenerate. The only difference
+ * between the two is what they hand in: Generate passes no completed rounds
+ * and tonight's ticked list; Regenerate passes the rounds already played and
+ * the list they were built from.
+ */
+function buildAndShowSchedule(players, lockedRounds) {
   clearScreen();
 
-  const players = getSelectedPlayers();
   const courtCount = readNumberInput("numCourts", 4);
-  const roundCount = readNumberInput("numRounds", 5);
+  const roundCount = getRoundCount();
   const playersPerCourt = readNumberInput("playersPerCourt", 4);
 
   // --- Basic sanity checks before we spend time searching ---
@@ -2939,11 +3536,42 @@ function handleGenerateClick() {
               playersPerCourt + " to fill a single court.");
     return;
   }
-
-  const roundShape = planRoundShape(players.length, courtCount, playersPerCourt);
-  if (roundShape.courtSizes.length === 0) {
-    showError("Not enough players to fill any court with these settings.");
+  if (lockedRounds.length >= roundCount) {
+    showError("Round " + roundCount + " is the last one, so there is nothing " +
+              "left to rebuild. Add more rounds first if the evening is running on.");
     return;
+  }
+
+  const sessionPlan = planSession(
+    players, roundCount, courtCount, playersPerCourt, lockedRounds);
+
+  const emptyRound = sessionPlan.rounds.find(function (round) {
+    return round.shape.courtSizes.length === 0;
+  });
+  if (emptyRound !== undefined) {
+    showError("Only " + emptyRound.available.length + " player(s) are down as " +
+              "being here for round " + emptyRound.roundNumber +
+              " — not enough to fill a single court.");
+    return;
+  }
+
+  /*
+   * Somebody can end up marked away for every single round — most easily by
+   * shortening the evening to three rounds while a player is down as arriving
+   * at round four. They would simply never appear on the sheet, with nothing
+   * on screen to say why, so say it.
+   */
+  const neverPlaying = players.filter(function (player) {
+    for (let round = 1; round <= roundCount; round++) {
+      if (isPlayerAvailable(player.id, round)) return false;
+    }
+    return true;
+  });
+  if (neverPlaying.length > 0) {
+    showError(neverPlaying.map(function (p) { return p.name; }).join(", ") +
+              (neverPlaying.length === 1 ? " is" : " are") +
+              " down as away for every round, and will not appear in the " +
+              "schedule at all. Change the availability boxes if that is wrong.");
   }
 
   // --- Tell the user up front whether zero repeats is achievable ---
@@ -2951,25 +3579,31 @@ function handleGenerateClick() {
   renderFeasibilityNotice(feasibility, players.length, roundCount);
 
   // --- And whether "at most one sit-out each" can hold tonight ---
-  const sitOutOverflow = checkSitOutOverflow(players.length, roundCount, roundShape);
+  const sitOutOverflow = checkSitOutOverflow(players.length, sessionPlan);
   if (sitOutOverflow !== null) {
     renderSitOutOverflowNotice(sitOutOverflow, players.length, roundCount, courtCount);
   }
 
-  // --- Warn about impossible keep-apart rules BEFORE spending the effort ---
-  const keepApartProblems = checkKeepApartFeasibility(players, roundShape, courtCount)
-    .concat(checkSingleCourtRotation(players, roundShape, roundCount));
-
-  for (const problem of keepApartProblems) {
-    showError(problem);
+  /*
+   * Warn about impossible keep-apart rules BEFORE spending the effort. Each
+   * round is checked with the people actually there, because a pair that fits
+   * comfortably across four courts may have nowhere to go in a round where
+   * half the group has gone home. Identical complaints collapse into one.
+   */
+  const keepApartProblems = new Set();
+  for (const round of sessionPlan.rounds) {
+    checkKeepApartFeasibility(round.available, round.shape, courtCount)
+      .concat(checkSingleCourtRotation(round.available, round.shape, sessionPlan.rounds.length))
+      .forEach(function (problem) { keepApartProblems.add(problem); });
   }
+  keepApartProblems.forEach(showError);
 
   // --- Search, then show what we found ---
   const conflictKeys = buildConflictKeys(players);
   const historyContext = buildHistoryContext(players, sectionPicker.value);
   const skillContext = buildSkillContext(players, sectionPicker.value);
   const result = findBestSchedule(
-    players, roundCount, roundShape, conflictKeys, historyContext, skillContext);
+    players, sessionPlan, conflictKeys, historyContext, skillContext);
 
   // The huge penalty steers the search away from violations, but when they
   // are unavoidable the winner will still contain one. Always check.
@@ -2993,10 +3627,119 @@ function handleGenerateClick() {
     sectionId: sectionPicker.value
   };
 
-  renderStats(result, describeLayout(roundShape, playersPerCourt));
+  renderStats(result, describeSessionLayout(sessionPlan, playersPerCourt));
   renderSaveSessionButton();
-  renderSchedule(result.schedule);
+  renderSchedule(result.schedule, lockedRounds.length);
+  updateRegenerateButton();
 }
+
+function handleGenerateClick() {
+  buildAndShowSchedule(getSelectedPlayers(), []);
+}
+
+/**
+ * The player list a regeneration must use.
+ *
+ * It has to START with exactly the list the completed rounds were built from,
+ * in the same order. The generator identifies people by their position in
+ * that list and the completed rounds hold references into it, so renumbering
+ * would quietly re-point every pairing in the night so far at somebody else.
+ *
+ * A walk-in nobody expected is added on the end, where a fresh position
+ * disturbs nothing. Anyone who has been unticked since is kept in the list —
+ * they played the earlier rounds and that still counts — but marked as gone
+ * from the current round on, which is what unticking them plainly means.
+ */
+function playersForRegeneration(previousPlayers) {
+  const players = previousPlayers.slice();
+  const alreadyListed = new Set(players.map(function (p) { return p.id; }));
+
+  const tickedNow = getSelectedPlayers();
+  const tickedIds = new Set(tickedNow.map(function (p) { return p.id; }));
+
+  for (const player of tickedNow) {
+    if (alreadyListed.has(player.id)) continue;
+    alreadyListed.add(player.id);
+    players.push({
+      index: players.length,
+      id: player.id,
+      name: player.name,
+      gender: player.gender
+    });
+  }
+
+  const roundCount = getRoundCount();
+  for (const player of previousPlayers) {
+    if (!tickedIds.has(player.id)) {
+      markRoundsUnavailable(player.id, currentRound, roundCount);
+    }
+  }
+
+  return players;
+}
+
+function handleRegenerateClick() {
+  if (lastGeneratedSession === null) {
+    clearScreen();
+    showError("Generate a schedule first, then come back here to rebuild the " +
+              "rest of it around who is actually still on court.");
+    return;
+  }
+
+  // Read before clearScreen, which throws the previous session away.
+  const previous = lastGeneratedSession;
+  const lockedRounds = previous.schedule.rounds.slice(0, currentRound - 1);
+
+  buildAndShowSchedule(playersForRegeneration(previous.players), lockedRounds);
+}
+
+/* ---------- The "which round are we on" control ---------- */
+
+const currentRoundPicker = document.getElementById("currentRoundPicker");
+
+/** Fills the round dropdown, keeping the coordinator's choice if it still fits. */
+function renderCurrentRoundPicker() {
+  const roundCount = getRoundCount();
+  if (currentRound > roundCount) currentRound = roundCount;
+
+  emptyElement(currentRoundPicker);
+  for (let round = 1; round <= roundCount; round++) {
+    const option = createElement("option", null, "Round " + round);
+    option.value = String(round);
+    currentRoundPicker.appendChild(option);
+  }
+  currentRoundPicker.value = String(currentRound);
+}
+
+/**
+ * Regenerating only makes sense once there is something to regenerate FROM,
+ * and its label names the round so there is no doubt about what is kept.
+ */
+function updateRegenerateButton() {
+  const button = document.getElementById("regenerateButton");
+  button.disabled = lastGeneratedSession === null;
+  button.textContent = currentRound === 1
+    ? "Rebuild the whole evening"
+    : "Regenerate from round " + currentRound;
+}
+
+currentRoundPicker.addEventListener("change", function () {
+  currentRound = parseInt(currentRoundPicker.value, 10) || 1;
+  // The "out from round N" buttons all name the round after this one.
+  refreshAvailabilityControls();
+  updateRegenerateButton();
+});
+
+// "input" rather than "change": every availability control lists the rounds
+// by name, so they are stale the moment the number is edited.
+document.getElementById("numRounds").addEventListener("input", function () {
+  const roundCount = getRoundCount();
+  stretchAvailabilityToRoundCount(roundCountLastSeen, roundCount);
+  roundCountLastSeen = roundCount;
+  renderCurrentRoundPicker();
+  refreshAvailabilityControls();
+  updateRegenerateButton();
+});
 
 sectionPicker.addEventListener("change", function () {
   // Changing section means setting up a different evening, so borrowed
@@ -3022,6 +3765,7 @@ document.getElementById("checkNoneButton").addEventListener("click", function ()
   setAllAttendance(false);
 });
 document.getElementById("generateButton").addEventListener("click", handleGenerateClick);
+document.getElementById("regenerateButton").addEventListener("click", handleRegenerateClick);
 
 
 /* =========================================================================
@@ -3946,7 +4690,9 @@ function tallySectionHistory(sectionId) {
     if (!tallies.has(playerId)) {
       tallies.set(playerId, {
         sessionsPlayed: 0,
-        roundsSatOut: 0,
+        roundsSatOut: 0,      // the capped figure that steers future schedules
+        roundsPlayed: 0,      // what actually happened, for the coordinator
+        roundsInSession: 0,
         partnerCounts: new Map()
       });
     }
@@ -3960,6 +4706,16 @@ function tallySectionHistory(sectionId) {
       const tally = tallyFor(playerId);
       tally.sessionsPlayed += 1;
       tally.roundsSatOut += session.satOutCounts[playerId] || 0;
+
+      // Sessions saved before court time was recorded have no figure at all,
+      // and are left out rather than guessed at. Their "N of M rounds" would
+      // otherwise silently be wrong for anyone who came and went.
+      if (session.roundsInSession !== null) {
+        tally.roundsInSession += session.roundsInSession;
+        tally.roundsPlayed += session.roundsPlayed[playerId] !== undefined
+          ? session.roundsPlayed[playerId]
+          : session.roundsInSession - (session.satOutCounts[playerId] || 0);
+      }
     }
 
     // Partnering is mutual, so each pair counts for both people.
@@ -4024,11 +4780,19 @@ function renderHistorySummary() {
 
     card.appendChild(createElement("div", "roster-name", row.player.name));
 
+    const sessionsText = row.tally.sessionsPlayed +
+      (row.tally.sessionsPlayed === 1 ? " session" : " sessions");
+
     card.appendChild(createElement("p", "summary-line",
-      row.tally.sessionsPlayed +
-      (row.tally.sessionsPlayed === 1 ? " session" : " sessions") +
-      " \u2014 sat out " + row.tally.roundsSatOut +
-      (row.tally.roundsSatOut === 1 ? " round" : " rounds") + " in total"));
+      row.tally.roundsInSession > 0
+        ? sessionsText + " \u2014 played " + row.tally.roundsPlayed + " of " +
+          row.tally.roundsInSession + " rounds"
+        : sessionsText));
+
+    card.appendChild(createElement("p", "summary-line",
+      "Counts as " + row.tally.roundsSatOut +
+      (row.tally.roundsSatOut === 1 ? " sit-out" : " sit-outs") +
+      " when balancing future nights"));
 
     card.appendChild(createElement("p", "summary-line",
       "Most often with: " + describeTopPartners(row.tally.partnerCounts)));
@@ -4083,6 +4847,9 @@ tabHistory.addEventListener("click", function () {
 
 // --- First draw ---
 renderSectionPicker();
+roundCountLastSeen = getRoundCount();
+renderCurrentRoundPicker();
+updateRegenerateButton();
 renderAttendanceList();
 renderOtherSectionList();
 renderGuestList();
