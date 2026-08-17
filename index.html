@@ -337,6 +337,29 @@
     padding: 8px 12px;
   }
 
+  /* ---------- Skill order ---------- */
+  /* A heading per tier, then one row per player in it, so the groupings are
+     visible at a glance rather than having to be read off numbers. */
+  .tier-heading {
+    font-size: 17px;
+    font-weight: bold;
+    margin: 18px 0 8px;
+  }
+
+  .tier-heading .hint { font-weight: normal; margin-left: 8px; }
+
+  /* Arrows are square, so two of them plus a worded button still fit on one
+     line at iPad width. Everything stays at the 44px touch minimum. */
+  .roster-row .row-actions button.arrow {
+    min-width: 44px;
+    font-size: 20px;
+    padding: 8px;
+  }
+
+  .roster-row .row-actions button:disabled {
+    opacity: 0.4;
+  }
+
   /* ---------- History screen ---------- */
   /* The save button sits under the stats, away from Generate, so the two
      are never confused for one another. */
@@ -528,6 +551,21 @@
     <div id="conflictList"></div>
   </div>
 
+  <div class="panel">
+    <h2>Skill order</h2>
+    <p class="subtitle">Rank a section strongest first. Players on the same tier
+      count as equals. This is used gently — enough to stop the two strongest
+      being put together against the two weakest, not enough to override playing
+      with different people each round.</p>
+
+    <div class="field">
+      <label for="tierSectionPicker">Section</label>
+      <select id="tierSectionPicker"></select>
+    </div>
+
+    <div id="tierList"></div>
+  </div>
+
   <h2>Roster</h2>
 
   <div class="filter-fields">
@@ -604,6 +642,22 @@ const PENALTY_REPEAT_OPPONENT    = 5;     // per repeated opponent pairing
 const PENALTY_SITOUT_IMBALANCE   = 8;     // per unit of (most sat - least sat)
 const PENALTY_SAME_COURT_IN_A_ROW = 3;    // per player stuck on same court no.
 const PENALTY_REPEAT_SINGLES     = 15;    // per repeated 1v1 matchup
+
+/*
+ * TEAM BALANCE — on purpose the smallest weight here.
+ *
+ * The aim is narrow: stop the two strongest players being stacked together
+ * against the two weakest. It is NOT to make every game even. Balancing by
+ * skill pulls directly against playing with different people, because there
+ * are only so many ways to pair a strong player with a weak one — turn this
+ * up and the same strong-with-weak couples come back week after week, which
+ * is the exact thing the rest of the scoring exists to prevent.
+ *
+ * Charged per point of difference between the two teams' tier totals. Where
+ * a section runs to five tiers, the worst court possible — 1+1 against 5+5 —
+ * costs 16, less than two repeated partnerships.
+ */
+const PENALTY_TEAM_BALANCE       = 2;     // per point of tier difference
 
 /*
  * PENALTIES THAT LOOK AT PAST SESSIONS
@@ -689,11 +743,15 @@ const PENALTY_SITOUT_RULE = 100000;       // per sit-out beyond a player's fair 
 const STORAGE_KEY = "pickleball-data";
 
 /*
- * Version 1 had no "history". Version 2 adds it. Reading a version 1 file is
- * not a special case in the code — cleanUpData simply finds no history and
- * leaves the empty array from buildDefaultData in place.
+ * Version 1 had no "history". Version 2 added it. Version 3 adds a skill
+ * order — a tier number per player, per section.
+ *
+ * Reading an older file is not a special case anywhere in the code:
+ * cleanUpData simply finds no history and no tiers, and the empty defaults
+ * from buildDefaultData stand. A section nobody has ordered behaves exactly
+ * as it did before tiers existed.
  */
-const DATA_VERSION = 2;
+const DATA_VERSION = 3;
 
 /** The starting point for a brand new device: five sections, nobody in them. */
 function buildDefaultData() {
@@ -758,7 +816,8 @@ function cleanUpData(rawData) {
         id: id,
         name: player.name.trim(),
         gender: player.gender === "M" || player.gender === "F" ? player.gender : null,
-        sections: sections
+        sections: sections,
+        tiers: cleanUpTiers(player.tiers, sections)
       });
     }
   }
@@ -799,6 +858,26 @@ function cleanUpData(rawData) {
   }
 
   return safeData;
+}
+
+/**
+ * Keeps only the tier numbers that mean something: a whole number, 1 or more,
+ * for a section this player is actually in. Tier 1 is the strongest.
+ *
+ * A tier for a section they have left is dropped rather than kept. Unlike
+ * history, a skill order is a live setting and not a record of what happened,
+ * so a stale one would silently reappear if they ever rejoined.
+ */
+function cleanUpTiers(rawTiers, sections) {
+  const tiers = {};
+  if (!rawTiers || typeof rawTiers !== "object") return tiers;
+
+  for (const sectionId of sections) {
+    const tier = rawTiers[sectionId];
+    if (Number.isInteger(tier) && tier >= 1) tiers[sectionId] = tier;
+  }
+
+  return tiers;
 }
 
 /** Keeps only the pairs that are genuinely two player ids, e.g. [["p1","p2"]]. */
@@ -908,6 +987,93 @@ function getPlayersInSection(sectionId) {
   return appData.players
     .filter(function (player) { return player.sections.indexOf(sectionId) !== -1; })
     .sort(function (a, b) { return a.name.localeCompare(b.name); });
+}
+
+/* ---------- Skill order within a section ---------- */
+
+/*
+ * Each player carries one tier number per section, in player.tiers[sectionId].
+ * Tier 1 is the strongest, and two people on the same number are equals.
+ *
+ * Everything reads the order through getTierGroups rather than off the stored
+ * numbers, and everything writes it through writeTierGroups, which renumbers
+ * from scratch. Nothing else should set player.tiers directly. That is what
+ * lets the rest of the app ignore gaps and oddities: a number left behind by
+ * a deleted player, or a hand-edited file, is closed up in one place.
+ */
+
+/**
+ * The section's players in tier groups, strongest first. groups[0] is tier 1,
+ * and everyone inside one group is an equal.
+ *
+ * A section nobody has ordered comes back as a single group holding everybody,
+ * which is the honest reading of "no skill order set": all equal, nothing to
+ * balance. The scoring then skips team balance entirely.
+ *
+ * Someone in an ordered section with no number of their own is put in the
+ * middle tier, because a row has to sit somewhere. That happens when a player
+ * is added to a section that was already ordered; the next move makes it
+ * permanent.
+ */
+function getTierGroups(sectionId) {
+  const players = getPlayersInSection(sectionId);
+  if (players.length === 0) return [];
+
+  let weakestTier = 0;
+  for (const player of players) {
+    const tier = player.tiers[sectionId];
+    if (tier !== undefined && tier > weakestTier) weakestTier = tier;
+  }
+  if (weakestTier === 0) return [players];
+
+  const middleTier = Math.round((1 + weakestTier) / 2);
+  const byTier = new Map();
+
+  for (const player of players) {
+    const ownTier = player.tiers[sectionId];
+    const tier = ownTier === undefined ? middleTier : ownTier;
+    if (!byTier.has(tier)) byTier.set(tier, []);
+    byTier.get(tier).push(player);
+  }
+
+  return Array.from(byTier.keys())
+    .sort(function (a, b) { return a - b; })
+    .map(function (tier) { return byTier.get(tier); });
+}
+
+/**
+ * Writes an ordered list of groups back onto the players, renumbering 1, 2,
+ * 3... so the tiers never develop gaps. Empty groups are dropped.
+ *
+ * Only this section's number is touched. A player's tier in every other
+ * section is left exactly as it was.
+ */
+function writeTierGroups(sectionId, groups) {
+  const kept = groups.filter(function (group) { return group.length > 0; });
+
+  kept.forEach(function (group, position) {
+    for (const player of group) {
+      player.tiers[sectionId] = position + 1;
+    }
+  });
+
+  saveData();
+}
+
+/**
+ * A section's tier number for each of its players, plus how many tiers there
+ * are. Read from the groups, so what the scoring uses and what the screen
+ * shows can never disagree.
+ */
+function buildSectionTiers(sectionId) {
+  const groups = getTierGroups(sectionId);
+  const tierOf = new Map();
+
+  groups.forEach(function (group, position) {
+    for (const player of group) tierOf.set(player.id, position + 1);
+  });
+
+  return { tierOf: tierOf, tierCount: groups.length };
 }
 
 /** True if these two people must be kept on separate courts. */
@@ -1246,6 +1412,7 @@ function buildRandomSchedule(players, roundCount, roundShape) {
      +15 per repeated singles matchup
      +8  per unit of sit-out imbalance (most sat-out minus least)
      +3  each time a player is on the same court number two rounds running
+     +2  per point of tier difference between the two teams on a court
 
    And the preferences that look back at saved sessions, all smaller:
      +4  x recency weight, per partner already played with
@@ -1546,6 +1713,57 @@ function buildEmptyHistoryContext(playerCount) {
 }
 
 /**
+ * Tonight's tier value for every player, in tonight's index order.
+ *
+ * Worked out once before the search rather than looked up per schedule: the
+ * search scores tens of thousands of candidates and none of this changes.
+ *
+ * Guests, and players borrowed from another section, land on the middle value.
+ * A borrowed player's own tier is deliberately ignored — tier 1 of Novice is
+ * not tier 1 of Advanced, so reading the number across would be meaningless.
+ */
+function buildSkillContext(players, sectionId) {
+  const section = buildSectionTiers(sectionId);
+
+  // Halfway between strongest and weakest, so anyone we cannot place is
+  // genuinely neutral rather than counted as slightly strong or slightly
+  // weak. Often a fraction, which is fine: the scoring only ever subtracts
+  // one team's total from the other's.
+  const middleValue = (1 + section.tierCount) / 2;
+
+  const tierValues = players.map(function (player) {
+    const tier = section.tierOf.get(player.id);
+    return tier === undefined ? middleValue : tier;
+  });
+
+  return {
+    tierValues: tierValues,
+    /*
+     * When everybody is on the same value there is nothing to balance and
+     * every court scores a flat zero. Skipping the term outright then means
+     * an unordered section behaves exactly as it did before tiers existed,
+     * rather than merely arriving at the same answer the slow way.
+     */
+    tierValuesDiffer: someValuesDiffer(tierValues)
+  };
+}
+
+/** A neutral skill order, for callers with no section to draw tiers from. */
+function buildEmptySkillContext(playerCount) {
+  return {
+    tierValues: new Array(playerCount).fill(1),
+    tierValuesDiffer: false
+  };
+}
+
+/** Adds up one team's tier values. */
+function totalTierValue(team, tierValues) {
+  let total = 0;
+  for (const player of team) total += tierValues[player.index];
+  return total;
+}
+
+/**
  * Adds up the recency weights for pairings tonight that also happened before.
  *
  * A pair that plays together twice tonight repeats history twice over, so the
@@ -1566,7 +1784,7 @@ function weighAgainstHistory(pairCountsTonight, historyWeights) {
  * Scores a schedule and also returns the raw numbers behind the score,
  * so we can show the user what the repeats actually are.
  */
-function scoreSchedule(schedule, playerCount, conflictKeys, historyContext) {
+function scoreSchedule(schedule, playerCount, conflictKeys, historyContext, skillContext) {
   const partnerCounts = new Map();
   const opponentCounts = new Map();
 
@@ -1580,6 +1798,9 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext) {
   let previousCourtOf = new Array(playerCount).fill(-1);
   let sameCourtInARow = 0;
 
+  // How lopsided the courts are, added up over the whole evening.
+  let teamImbalance = 0;
+
   for (const round of schedule.rounds) {
     const currentCourtOf = new Array(playerCount).fill(-1);
 
@@ -1592,6 +1813,15 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext) {
       // tally is only about having the SAME singles game twice.
       if (isSinglesCourt(court)) {
         recordOpponentPairs(court.teamOne, court.teamTwo, singlesCounts);
+      }
+
+      // Skill balance, doubles only. A 1v1 has no teams to even up, and
+      // pairing two players of a similar standard is already what the tier
+      // difference would be measuring there anyway.
+      if (skillContext.tierValuesDiffer && !isSinglesCourt(court)) {
+        teamImbalance += Math.abs(
+          totalTierValue(court.teamOne, skillContext.tierValues) -
+          totalTierValue(court.teamTwo, skillContext.tierValues));
       }
 
       for (const player of court.teamOne.concat(court.teamTwo)) {
@@ -1659,6 +1889,7 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext) {
     + repeatedSingles    * PENALTY_REPEAT_SINGLES
     + sitOutImbalance    * PENALTY_SITOUT_IMBALANCE
     + sameCourtInARow    * PENALTY_SAME_COURT_IN_A_ROW
+    + teamImbalance      * PENALTY_TEAM_BALANCE
     + historyPartnerWeight  * PENALTY_HISTORY_PARTNER
     + historyOpponentWeight * PENALTY_HISTORY_OPPONENT
     + sitOutRateSpread * PENALTY_HISTORY_SITOUT_RATE_SPREAD;
@@ -1672,6 +1903,8 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext) {
     repeatedSingles: repeatedSingles,
     sitOutImbalance: sitOutImbalance,
     sameCourtInARow: sameCourtInARow,
+    teamImbalance: teamImbalance,
+    skillOrderUsed: skillContext.tierValuesDiffer,
     mostSitOuts: mostSitOuts,
     leastSitOuts: leastSitOuts,
     historyPartnerWeight: historyPartnerWeight,
@@ -1688,18 +1921,19 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext) {
    Build ATTEMPT_COUNT random schedules, score each one, keep the best.
    ========================================================================= */
 
-function findBestSchedule(players, roundCount, roundShape, conflictKeys, historyContext) {
+function findBestSchedule(players, roundCount, roundShape, conflictKeys, historyContext, skillContext) {
   const startTime = performance.now();
 
-  // Callers without any history to consider still get a valid, empty one.
+  // Callers without any history or skill order still get valid, empty ones.
   const history = historyContext || buildEmptyHistoryContext(players.length);
+  const skill = skillContext || buildEmptySkillContext(players.length);
 
   let bestSchedule = null;
   let bestReport = null;
 
   for (let attempt = 0; attempt < ATTEMPT_COUNT; attempt++) {
     const candidate = buildRandomSchedule(players, roundCount, roundShape);
-    const report = scoreSchedule(candidate, players.length, conflictKeys, history);
+    const report = scoreSchedule(candidate, players.length, conflictKeys, history, skill);
 
     if (bestReport === null || report.score < bestReport.score) {
       bestSchedule = candidate;
@@ -2071,6 +2305,16 @@ function renderStats(result, layoutText) {
     report.sameCourtInARow + " " +
     (report.sameCourtInARow === 1 ? "time a player stays" : "times a player stays") +
     " on the same court two rounds running"));
+
+  // Silent for a section nobody has put in skill order, where the number
+  // would always be zero and would only invite the question "zero what?".
+  if (report.skillOrderUsed) {
+    list.appendChild(createElement("li", null,
+      "Tier difference between teams totals " +
+      Math.round(report.teamImbalance * 10) / 10 +
+      " across all courts (0 would be perfectly even)"));
+  }
+
   box.appendChild(list);
 
   // Only mention past sessions when there actually were some.
@@ -2679,7 +2923,9 @@ function handleGenerateClick() {
   // --- Search, then show what we found ---
   const conflictKeys = buildConflictKeys(players);
   const historyContext = buildHistoryContext(players, sectionPicker.value);
-  const result = findBestSchedule(players, roundCount, roundShape, conflictKeys, historyContext);
+  const skillContext = buildSkillContext(players, sectionPicker.value);
+  const result = findBestSchedule(
+    players, roundCount, roundShape, conflictKeys, historyContext, skillContext);
 
   // The huge penalty steers the search away from violations, but when they
   // are unavoidable the winner will still contain one. Always check.
@@ -2848,19 +3094,28 @@ function handleSavePlayerClick() {
       id: makeNewPlayerId(),
       name: name,
       gender: gender,
-      sections: sections
+      sections: sections,
+      // No tier yet. In a section that has been ranked they show up in the
+      // middle until somebody moves them; in one that has not, everybody is
+      // equal anyway.
+      tiers: {}
     });
   } else {
     const player = findPlayer(editingPlayerId);
     player.name = name;
     player.gender = gender;
     player.sections = sections;
+
+    // Leaving a section drops the skill order that went with it, exactly as
+    // a reload would. Rejoining later starts them in the middle again.
+    player.tiers = cleanUpTiers(player.tiers, sections);
   }
 
   const wasEditing = editingPlayerId !== null;
   const savedOk = saveData();
   resetPlayerForm();
   renderRoster();
+  renderTierList();
   renderAttendanceList();
   renderOtherSectionList();
   renderConflictPickers();
@@ -2904,6 +3159,7 @@ function handleDeletePlayerClick(playerId) {
   borrowedPlayerIds.delete(playerId);
 
   renderRoster();
+  renderTierList();
   renderAttendanceList();
   renderOtherSectionList();
   renderConflictPickers();
@@ -3166,10 +3422,227 @@ function renderRoster() {
   }
 }
 
+/* ---------- Skill order ---------- */
+
+const tierSectionPicker = document.getElementById("tierSectionPicker");
+const tierList = document.getElementById("tierList");
+
+/** Fills the skill order section dropdown. Unlike the roster filter, one only. */
+function renderTierSectionPicker() {
+  const previousChoice = tierSectionPicker.value;
+  emptyElement(tierSectionPicker);
+
+  for (const section of appData.sections) {
+    const option = document.createElement("option");
+    option.value = section.id;
+    option.textContent = section.name;
+    tierSectionPicker.appendChild(option);
+  }
+
+  if (previousChoice && findSection(previousChoice) !== null) {
+    tierSectionPicker.value = previousChoice;
+  }
+}
+
+/** Which group a player is in, or -1 if they are not in this section. */
+function findTierGroupIndex(groups, playerId) {
+  return groups.findIndex(function (group) {
+    return group.some(function (player) { return player.id === playerId; });
+  });
+}
+
+/** Swaps two whole tiers, so everybody in them changes places together. */
+function swapGroups(groups, positionA, positionB) {
+  const held = groups[positionA];
+  groups[positionA] = groups[positionB];
+  groups[positionB] = held;
+}
+
+/**
+ * Lifts one player out of a shared tier into a tier of their own, inserted at
+ * the given position. Their former equals stay where they are.
+ */
+function splitOutOfGroup(groups, groupIndex, playerId, newPosition) {
+  const leaving = groups[groupIndex].find(function (p) { return p.id === playerId; });
+
+  groups[groupIndex] = groups[groupIndex].filter(function (p) { return p.id !== playerId; });
+  groups.splice(newPosition, 0, [leaving]);
+}
+
+/**
+ * Moves a player one step towards the strong end.
+ *
+ * Somebody sharing a tier steps out of it first, into a tier of their own
+ * just above their former equals. That is one step, not two: they were level
+ * with those players and now they are above them.
+ *
+ * Somebody already alone in their tier changes places with the tier above,
+ * which moves everybody in that tier down together.
+ */
+function moveTierUp(sectionId, playerId) {
+  const groups = getTierGroups(sectionId);
+  const at = findTierGroupIndex(groups, playerId);
+  if (at === -1) return;
+
+  if (groups[at].length > 1) {
+    splitOutOfGroup(groups, at, playerId, at);
+  } else if (at > 0) {
+    swapGroups(groups, at, at - 1);
+  } else {
+    return; // alone in tier 1 already: nowhere left to go
+  }
+
+  writeTierGroups(sectionId, groups);
+  renderTierList();
+}
+
+/** The mirror image of moveTierUp: one step towards the weak end. */
+function moveTierDown(sectionId, playerId) {
+  const groups = getTierGroups(sectionId);
+  const at = findTierGroupIndex(groups, playerId);
+  if (at === -1) return;
+
+  if (groups[at].length > 1) {
+    splitOutOfGroup(groups, at, playerId, at + 1);
+  } else if (at < groups.length - 1) {
+    swapGroups(groups, at, at + 1);
+  } else {
+    return; // alone in the weakest tier already
+  }
+
+  writeTierGroups(sectionId, groups);
+  renderTierList();
+}
+
+/**
+ * Makes a player an equal of the tier immediately above theirs.
+ *
+ * If they were alone, their old tier disappears and everything below it moves
+ * up a number, because writeTierGroups renumbers from scratch.
+ */
+function joinTierAbove(sectionId, playerId) {
+  const groups = getTierGroups(sectionId);
+  const at = findTierGroupIndex(groups, playerId);
+  if (at <= 0) return; // nothing above tier 1 to join
+
+  const joining = groups[at].find(function (p) { return p.id === playerId; });
+  groups[at] = groups[at].filter(function (p) { return p.id !== playerId; });
+  groups[at - 1].push(joining);
+
+  writeTierGroups(sectionId, groups);
+  renderTierList();
+}
+
+/**
+ * Takes a player back out of a shared tier, into one of their own just below
+ * the equals they are leaving.
+ *
+ * The down arrow does the same thing for somebody sharing a tier. Both exist
+ * because the arrow is about order and this is about equality, and a button
+ * that says what it does is easier to find than knowing the arrow doubles up.
+ *
+ * Anybody weaker shifts down a number to make room for the new tier. That is
+ * a real change to their number but not to their standing: the whole order,
+ * top to bottom, is otherwise exactly as it was.
+ */
+function splitFromTier(sectionId, playerId) {
+  const groups = getTierGroups(sectionId);
+  const at = findTierGroupIndex(groups, playerId);
+  if (at === -1 || groups[at].length < 2) return;
+
+  splitOutOfGroup(groups, at, playerId, at + 1);
+  writeTierGroups(sectionId, groups);
+  renderTierList();
+}
+
+/** One player's row in the skill order: name, then the four controls. */
+function renderTierRow(player, sectionId, groupIndex, groupSize, groupCount) {
+  const row = createElement("div", "roster-row");
+  row.appendChild(createElement("span", "roster-name", player.name));
+
+  const actions = createElement("div", "row-actions");
+
+  function addButton(className, label, description, isDisabled, onClick) {
+    const button = createElement("button", className, label);
+    button.type = "button";
+    button.title = description;
+    button.setAttribute("aria-label", description);
+    button.disabled = isDisabled;
+    if (!isDisabled) button.addEventListener("click", onClick);
+    actions.appendChild(button);
+  }
+
+  // Somebody alone at the top or the bottom has nowhere further to go. Anyone
+  // sharing a tier always has somewhere: out of it, in either direction.
+  const isAloneAtTop = groupIndex === 0 && groupSize === 1;
+  const isAloneAtBottom = groupIndex === groupCount - 1 && groupSize === 1;
+
+  addButton("secondary arrow", "\u2191", "Move " + player.name + " up",
+    isAloneAtTop,
+    function () { moveTierUp(sectionId, player.id); });
+
+  addButton("secondary arrow", "\u2193", "Move " + player.name + " down",
+    isAloneAtBottom,
+    function () { moveTierDown(sectionId, player.id); });
+
+  addButton("secondary", "Equal to above",
+    "Put " + player.name + " on the same tier as the one above",
+    groupIndex === 0,
+    function () { joinTierAbove(sectionId, player.id); });
+
+  // Only worth showing when there is actually a tier to leave.
+  if (groupSize > 1) {
+    addButton("secondary", "Split off",
+      "Give " + player.name + " a tier of their own, below their equals",
+      false,
+      function () { splitFromTier(sectionId, player.id); });
+  }
+
+  row.appendChild(actions);
+  return row;
+}
+
+/** Draws the chosen section in tier order, strongest tier first. */
+function renderTierList() {
+  emptyElement(tierList);
+
+  const sectionId = tierSectionPicker.value;
+  const groups = getTierGroups(sectionId);
+
+  if (groups.length === 0) {
+    tierList.appendChild(createElement("div", "empty-note",
+      "Nobody is in this section yet."));
+    return;
+  }
+
+  // One tier means everybody counts as equal, which is also what a section
+  // nobody has touched looks like. Say so, because an untouched section
+  // otherwise looks like an order that happens to be alphabetical.
+  if (groups.length === 1) {
+    tierList.appendChild(createElement("p", "hint",
+      "Everyone here counts as equal, so team balance is not applied to this " +
+      "section. Move somebody up or down to start ranking."));
+  }
+
+  groups.forEach(function (group, groupIndex) {
+    const heading = createElement("div", "tier-heading", "Tier " + (groupIndex + 1));
+    if (group.length > 1) {
+      heading.appendChild(createElement("span", "hint", "— " + group.length + " equal"));
+    }
+    tierList.appendChild(heading);
+
+    for (const player of group) {
+      tierList.appendChild(
+        renderTierRow(player, sectionId, groupIndex, group.length, groups.length));
+    }
+  });
+}
+
 document.getElementById("savePlayerButton").addEventListener("click", handleSavePlayerClick);
 cancelEditButton.addEventListener("click", resetPlayerForm);
 rosterSearch.addEventListener("input", renderRoster);
 rosterSectionFilter.addEventListener("change", renderRoster);
+tierSectionPicker.addEventListener("change", renderTierList);
 
 
 /* =========================================================================
@@ -3265,6 +3738,8 @@ function handleImportFileChosen(event) {
     renderPlayerSectionChoices();
     renderRosterSectionFilter();
     renderRoster();
+    renderTierSectionPicker();
+    renderTierList();
     renderConflictPickers();
     renderConflictList();
     renderSectionPicker();
@@ -3570,6 +4045,8 @@ renderGuestList();
 renderPlayerSectionChoices();
 renderRosterSectionFilter();
 renderRoster();
+renderTierSectionPicker();
+renderTierList();
 renderConflictPickers();
 renderConflictList();
 renderHistorySectionPicker();
