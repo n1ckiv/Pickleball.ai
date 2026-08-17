@@ -665,6 +665,19 @@ const PENALTY_HISTORY_SITOUT_RATE_SPREAD =
  */
 const PENALTY_CONFLICT = 100000;          // per keep-apart pair sharing a court
 
+/*
+ * Sit-outs are shared as evenly as the numbers allow. Nobody sits out for the
+ * Nth time until everyone has sat out N-1 times, which on an ordinary night —
+ * where there are fewer sit-out slots than players — means at most once each.
+ *
+ * This is a HARD rule like keep-apart, not a preference, so it is priced the
+ * same way. Unlike keep-apart it is also guaranteed by construction: see
+ * chooseSitOuts, which only ever benches people from among the least-benched.
+ * The penalty and the check on the winner are therefore belt and braces, kept
+ * so that a future change to the builder cannot quietly break the rule.
+ */
+const PENALTY_SITOUT_RULE = 100000;       // per sit-out beyond a player's fair share
+
 
 /* =========================================================================
    SECTION 0 — SAVED DATA (localStorage)
@@ -1222,11 +1235,23 @@ function buildRandomSchedule(players, roundCount, roundShape) {
 /* =========================================================================
    SECTION 4 — SCORING A SCHEDULE
 
-   Lower is better. The four penalties are:
+   Lower is better. Two hard rules, priced so that breaking one is worse
+   than every soft consideration put together:
+     +100000 per keep-apart pair sharing a court
+     +100000 per sit-out beyond a player's fair share
+
+   Then the preferences, about tonight:
      +10 per repeated partner pairing
      +5  per repeated opponent pairing
+     +15 per repeated singles matchup
      +8  per unit of sit-out imbalance (most sat-out minus least)
      +3  each time a player is on the same court number two rounds running
+
+   And the preferences that look back at saved sessions, all smaller:
+     +4  x recency weight, per partner already played with
+     +2  x recency weight, per opponent already met
+     +54 per unit of spread in sit-outs PER SESSION (a rate, so fractional —
+         about 6 per whole sit-out, see PENALTY_HISTORY_SITOUT_RATE_SPREAD)
    ========================================================================= */
 
 /** Builds a stable key from two positions in tonight's list, e.g. "3|7". */
@@ -1312,6 +1337,68 @@ function findConflictViolations(schedule, conflictKeys) {
   });
 
   return violations;
+}
+
+/**
+ * The most times anyone may sit out before the rule is broken.
+ *
+ * Everyone must reach N-1 before anyone reaches N, so the ceiling is always
+ * one more than whatever the least-benched player has. On an ordinary night
+ * somebody escapes the bench entirely, that least is 0, and the ceiling is 1.
+ */
+function fairMaximumSitOuts(sitOutTally) {
+  return Math.min.apply(null, sitOutTally) + 1;
+}
+
+/**
+ * Counts sit-outs taken beyond a player's fair share.
+ *
+ * Cheap enough for the inner loop: the scorer only needs to know how badly a
+ * candidate breaks the rule, not who by. findSitOutRuleBreaches does the
+ * naming afterwards, once, for the schedule that actually won.
+ */
+function countSitOutRuleBreaches(sitOutTally) {
+  const ceiling = fairMaximumSitOuts(sitOutTally);
+
+  let breaches = 0;
+  for (const timesSatOut of sitOutTally) {
+    if (timesSatOut > ceiling) breaches += timesSatOut - ceiling;
+  }
+  return breaches;
+}
+
+/**
+ * Names who sat out too often and in which rounds, for the warning.
+ *
+ * Note this reports a broken RULE, not an unlucky night. Sitting twice when
+ * there are more sit-out slots than players is expected and not a breach —
+ * the ceiling rises with the least-benched player. See checkSitOutOverflow,
+ * which warns about that case up front instead.
+ */
+function findSitOutRuleBreaches(schedule, players) {
+  const ceiling = fairMaximumSitOuts(schedule.sitOutTally);
+
+  const roundsSatOutBy = new Map();
+  schedule.rounds.forEach(function (round, roundIndex) {
+    for (const player of round.sitOuts) {
+      if (!roundsSatOutBy.has(player.index)) roundsSatOutBy.set(player.index, []);
+      roundsSatOutBy.get(player.index).push(roundIndex + 1);
+    }
+  });
+
+  const breaches = [];
+  for (const player of players) {
+    const timesSatOut = schedule.sitOutTally[player.index];
+    if (timesSatOut <= ceiling) continue;
+
+    breaches.push({
+      player: player,
+      timesSatOut: timesSatOut,
+      fairMaximum: ceiling,
+      roundNumbers: roundsSatOutBy.get(player.index) || []
+    });
+  }
+  return breaches;
 }
 
 /**
@@ -1526,6 +1613,7 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext) {
   const mostSitOuts = Math.max.apply(null, schedule.sitOutTally);
   const leastSitOuts = Math.min.apply(null, schedule.sitOutTally);
   const sitOutImbalance = mostSitOuts - leastSitOuts;
+  const sitOutRuleBreaches = countSitOutRuleBreaches(schedule.sitOutTally);
 
   // --- How much of tonight is a rerun of previous weeks? ---
   const historyPartnerWeight = weighAgainstHistory(partnerCounts, historyContext.partnerWeights);
@@ -1565,6 +1653,7 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext) {
 
   const score =
       conflictViolations * PENALTY_CONFLICT
+    + sitOutRuleBreaches * PENALTY_SITOUT_RULE
     + repeatedPartners   * PENALTY_REPEAT_PARTNER
     + repeatedOpponents  * PENALTY_REPEAT_OPPONENT
     + repeatedSingles    * PENALTY_REPEAT_SINGLES
@@ -1577,6 +1666,7 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext) {
   return {
     score: score,
     conflictViolations: conflictViolations,
+    sitOutRuleBreaches: sitOutRuleBreaches,
     repeatedPartners: repeatedPartners,
     repeatedOpponents: repeatedOpponents,
     repeatedSingles: repeatedSingles,
@@ -1646,6 +1736,31 @@ function checkFeasibility(playerCount, roundCount, playersPerCourt) {
     otherPlayersAvailable: otherPlayersAvailable,
     unavoidableRepeats: unavoidableRepeats,
     zeroRepeatsPossible: unavoidableRepeats === 0
+  };
+}
+
+/**
+ * Works out whether "at most one sit-out each" can hold tonight.
+ *
+ * Every round benches the players who have no seat, so across the session
+ * there are rounds x sit-outs-per-round slots to fill. Once those outnumber
+ * the players, somebody has to take a second one — no schedule can avoid it,
+ * so we say so before generating rather than looking as though it went wrong.
+ *
+ * Returns null when the rule holds comfortably.
+ */
+function checkSitOutOverflow(playerCount, roundCount, roundShape) {
+  const sitOutSlots = roundCount * roundShape.sitOutCount;
+  if (sitOutSlots <= playerCount) return null;
+
+  // Spread as evenly as possible, this is how often the unlucky ones sit.
+  const mostAnyoneSits = Math.ceil(sitOutSlots / playerCount);
+  const howManySitThatOften = sitOutSlots - playerCount * (mostAnyoneSits - 1);
+
+  return {
+    sitOutSlots: sitOutSlots,
+    mostAnyoneSits: mostAnyoneSits,
+    howManySitThatOften: howManySitThatOften
   };
 }
 
@@ -1892,6 +2007,38 @@ function renderFeasibilityNotice(feasibility, playerCount, roundCount) {
   messagesElement.appendChild(box);
 }
 
+/**
+ * Explains up front that there are more sit-out slots than players, so the
+ * usual "at most one each" cannot hold tonight. Not an error — just arithmetic
+ * the user should hear from us rather than discover in the schedule.
+ */
+function renderSitOutOverflowNotice(overflow, playerCount, roundCount, courtCount) {
+  const box = createElement("div", "notice");
+
+  box.appendChild(createElement("p", null,
+    playerCount + " players, " + roundCount + " rounds, " + courtCount +
+    (courtCount === 1 ? " court: " : " courts: ") +
+    overflow.sitOutSlots + " sit-out slots for " + playerCount +
+    " players — at least " + overflow.howManySitThatOften +
+    (overflow.howManySitThatOften === 1 ? " player must sit " : " players must sit ") +
+    describeTimes(overflow.mostAnyoneSits) + "."));
+
+  box.appendChild(createElement("p", null,
+    "Sit-outs are still shared as evenly as possible: nobody sits " +
+    describeTimes(overflow.mostAnyoneSits) + " until everyone has sat " +
+    describeTimes(overflow.mostAnyoneSits - 1) + "."));
+
+  messagesElement.appendChild(box);
+}
+
+/** "once", "twice", "3 times" — so messages read like English. */
+function describeTimes(count) {
+  if (count === 0) return "no times";
+  if (count === 1) return "once";
+  if (count === 2) return "twice";
+  return count + " times";
+}
+
 /** The summary panel: score, timing, and the repeats we actually ended up with. */
 function renderStats(result, layoutText) {
   const report = result.report;
@@ -2004,6 +2151,32 @@ function renderConflictWarning(violations) {
         ? " (they are the 1v1 on court " + violation.courtNumber + ")"
         : " (court " + violation.courtNumber + ")") +
       ". Adjust manually or sit one of them out."));
+  }
+
+  resultsElement.appendChild(box);
+}
+
+/**
+ * Warns that the winning schedule benches somebody more than their share.
+ *
+ * This should never appear: chooseSitOuts cannot build such a schedule. It
+ * exists so that if that ever stops being true, the schedule is not presented
+ * as though it were fine.
+ */
+function renderSitOutRuleWarning(breaches) {
+  const box = createElement("div", "notice error");
+
+  box.appendChild(createElement("p", null,
+    breaches.length === 1
+      ? "Sit-out rule broken in the schedule below."
+      : "Sit-out rule broken for " + breaches.length + " players in the schedule below."));
+
+  for (const breach of breaches) {
+    box.appendChild(createElement("p", null,
+      breach.player.name + " sits out " + describeTimes(breach.timesSatOut) +
+      " (rounds " + breach.roundNumbers.join(", ") + ") when the fair maximum " +
+      "tonight is " + describeTimes(breach.fairMaximum) +
+      ". Swap one of those rounds with somebody who sits out less."));
   }
 
   resultsElement.appendChild(box);
@@ -2489,6 +2662,12 @@ function handleGenerateClick() {
   const feasibility = checkFeasibility(players.length, roundCount, playersPerCourt);
   renderFeasibilityNotice(feasibility, players.length, roundCount);
 
+  // --- And whether "at most one sit-out each" can hold tonight ---
+  const sitOutOverflow = checkSitOutOverflow(players.length, roundCount, roundShape);
+  if (sitOutOverflow !== null) {
+    renderSitOutOverflowNotice(sitOutOverflow, players.length, roundCount, courtCount);
+  }
+
   // --- Warn about impossible keep-apart rules BEFORE spending the effort ---
   const keepApartProblems = checkKeepApartFeasibility(players, roundShape, courtCount)
     .concat(checkSingleCourtRotation(players, roundShape, roundCount));
@@ -2507,6 +2686,13 @@ function handleGenerateClick() {
   const violations = findConflictViolations(result.schedule, conflictKeys);
   if (violations.length > 0) {
     renderConflictWarning(violations);
+  }
+
+  // Same again for the sit-out rule. Guaranteed by chooseSitOuts, so this is
+  // a guard against a future change rather than something that fires today.
+  const sitOutBreaches = findSitOutRuleBreaches(result.schedule, players);
+  if (sitOutBreaches.length > 0) {
+    renderSitOutRuleWarning(sitOutBreaches);
   }
 
   // Held in memory only. It is written to storage if — and only if — the
