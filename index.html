@@ -612,13 +612,47 @@ const PENALTY_REPEAT_SINGLES     = 15;    // per repeated 1v1 matchup
  * partnering the same person twice in one evening is far more noticeable
  * than partnering them again a fortnight later.
  *
+ * The sit-out one below is the exception in appearance only. Its number is
+ * large because it is priced per unit of RATE, which is a fraction; per whole
+ * sit-out it still works out at PENALTY_HISTORY_SITOUT_SPREAD.
+ *
  * The first two are multiplied by a recency weight (see recencyWeightFor),
  * so an old session nudges the search rather than shoving it.
  */
 const HISTORY_SESSIONS_USED       = 8;    // how many past sessions to look at
 const PENALTY_HISTORY_PARTNER     = 4;    // x weight, per partner seen before
 const PENALTY_HISTORY_OPPONENT    = 2;    // x weight, per opponent seen before
-const PENALTY_HISTORY_SITOUT_SPREAD = 6;  // per unit of imbalance in lifetime sit-outs
+const PENALTY_HISTORY_SITOUT_SPREAD = 6;  // per whole sit-out of imbalance
+
+/*
+ * SIT-OUTS ARE COMPARED AS RATES, NOT TOTALS
+ *
+ * "Six sit-outs" means something very different for someone who comes every
+ * week than for someone who comes twice a term. Comparing totals rewards
+ * turning up: a rare attender cannot accumulate sit-outs, so she looks owed
+ * bench time and gets benched even more. We divide by sessions attended.
+ *
+ * A rate from one or two nights is noise — sit out twice on your first night
+ * and you look like a 2.0-per-session case forever. Anyone below this many
+ * recorded sessions is treated as average instead of being judged on it.
+ */
+const HISTORY_MIN_SESSIONS_FOR_OWN_RATE = 3;
+
+/*
+ * Every player's rate is projected over this same number of nights before
+ * tonight is added, regardless of how long they have actually been coming.
+ * See rateIncludingTonight for why the shared horizon is the whole point.
+ */
+const HISTORY_RATE_HORIZON_NIGHTS = HISTORY_SESSIONS_USED;
+
+/*
+ * Rates are fractions, so a unit of rate imbalance is worth far more than a
+ * unit of count imbalance was. One extra sit-out over the horizon moves a
+ * rate by only 1/9, so the price per unit is scaled up to match, keeping
+ * history's pull on the schedule about as strong as it was before.
+ */
+const PENALTY_HISTORY_SITOUT_RATE_SPREAD =
+  PENALTY_HISTORY_SITOUT_SPREAD * (HISTORY_RATE_HORIZON_NIGHTS + 1);   // = 54
 
 /*
  * Keep-apart pairs are a HARD constraint, not a preference. The penalty is
@@ -789,10 +823,16 @@ function cleanUpHistorySession(rawSession) {
 
   if (playerIds.length === 0) return null; // a session with nobody in it tells us nothing
 
+  // A sit-out only counts if the person was recorded as being there. Sit-outs
+  // are now divided by nights attended, so a count with nobody behind it would
+  // inflate that player's rate and the section average everyone else is
+  // measured against. Only an edited or foreign backup can contain one.
+  const wasPresent = new Set(playerIds);
   const satOutCounts = {};
   if (rawSession.satOutCounts && typeof rawSession.satOutCounts === "object") {
     for (const playerId of Object.keys(rawSession.satOutCounts)) {
       const count = rawSession.satOutCounts[playerId];
+      if (!wasPresent.has(playerId)) continue;
       if (Number.isFinite(count) && count >= 0) satOutCounts[playerId] = count;
     }
   }
@@ -1293,6 +1333,7 @@ function buildHistoryContext(players, sectionId) {
   const partnerWeights = new Map();
   const opponentWeights = new Map();
   const pastSitOuts = new Array(players.length).fill(0);
+  const sessionsAttended = new Array(players.length).fill(0);
 
   const sessions = getRecentSessionsForSection(sectionId, HISTORY_SESSIONS_USED);
 
@@ -1314,20 +1355,96 @@ function buildHistoryContext(players, sectionId) {
     addPairsToWeights(session.partners, partnerWeights, weight);
     addPairsToWeights(session.opponents, opponentWeights, weight);
 
-    // Sit-outs are counted as they happened, not weighted. "You have sat out
-    // six times this term" is a plain fact; ageing it would hide it.
+    // Sit-outs are counted as they happened, not aged like the pairings above.
+    // How often someone gets benched per night is a standing fact about how
+    // the club has treated them; fading it would quietly forgive it.
     for (const playerId of Object.keys(session.satOutCounts)) {
       const index = indexOfPlayerId.get(playerId);
       if (index !== undefined) pastSitOuts[index] += session.satOutCounts[playerId];
     }
+
+    // Attendance is what turns those totals into rates.
+    for (const playerId of session.playerIds) {
+      const index = indexOfPlayerId.get(playerId);
+      if (index !== undefined) sessionsAttended[index] += 1;
+    }
   });
+
+  const averageRate = averageSitOutsPerPlayerNight(sessions);
+  const baselineRates = [];
+  for (let index = 0; index < players.length; index++) {
+    baselineRates.push(sitOutRateBaselineFor(
+      pastSitOuts[index], sessionsAttended[index], averageRate));
+  }
 
   return {
     sessionsUsed: sessions.length,
     partnerWeights: partnerWeights,
     opponentWeights: opponentWeights,
-    pastSitOuts: pastSitOuts
+    sitOutRateBaselines: baselineRates,
+    baselineRatesDiffer: someValuesDiffer(baselineRates)
   };
+}
+
+/** True when the values are not all identical. */
+function someValuesDiffer(values) {
+  for (const value of values) {
+    if (value !== values[0]) return true;
+  }
+  return false;
+}
+
+/**
+ * The section's typical sit-outs per player per night.
+ *
+ * Averaged over player-nights rather than over sessions, so a busy night and
+ * a thin one each count for what they actually were.
+ *
+ * This is the neutral starting point for anyone we cannot fairly judge yet:
+ * it says "no claim either way", where a zero would have said "maximally
+ * owed bench time" and got newcomers benched for having never played.
+ */
+function averageSitOutsPerPlayerNight(sessions) {
+  let totalSitOuts = 0;
+  let totalPlayerNights = 0;
+
+  for (const session of sessions) {
+    for (const playerId of Object.keys(session.satOutCounts)) {
+      totalSitOuts += session.satOutCounts[playerId];
+    }
+    totalPlayerNights += session.playerIds.length;
+  }
+
+  if (totalPlayerNights === 0) return 0;
+  return totalSitOuts / totalPlayerNights;
+}
+
+/**
+ * The rate we will judge one player by, before tonight is added.
+ *
+ * Their own rate once there is enough of a record to mean anything; the
+ * section average until then. A newcomer and a two-week trialist are both
+ * "unknown", and unknown should not be a disadvantage.
+ */
+function sitOutRateBaselineFor(pastSitOuts, sessionsAttended, averageRate) {
+  const hasEnoughRecord = sessionsAttended >= HISTORY_MIN_SESSIONS_FOR_OWN_RATE;
+  if (!hasEnoughRecord) return averageRate;
+
+  return pastSitOuts / sessionsAttended;
+}
+
+/**
+ * What a player's sit-out rate becomes if tonight goes as proposed.
+ *
+ * Everyone is measured over the SAME number of nights, whatever the length of
+ * their actual record. That matters more than it looks: dividing by each
+ * player's own attendance would drag a short record much further per sit-out
+ * than a long one, so a newcomer would end up carrying extra bench time again
+ * — the very thing rates were meant to fix.
+ */
+function rateIncludingTonight(baselineRate, sitOutsTonight) {
+  const sitOutsOverHorizon = baselineRate * HISTORY_RATE_HORIZON_NIGHTS + sitOutsTonight;
+  return sitOutsOverHorizon / (HISTORY_RATE_HORIZON_NIGHTS + 1);
 }
 
 /** An empty history, for when there is nothing saved yet. */
@@ -1336,7 +1453,8 @@ function buildEmptyHistoryContext(playerCount) {
     sessionsUsed: 0,
     partnerWeights: new Map(),
     opponentWeights: new Map(),
-    pastSitOuts: new Array(playerCount).fill(0)
+    sitOutRateBaselines: new Array(playerCount).fill(0),
+    baselineRatesDiffer: false
   };
 }
 
@@ -1414,26 +1532,35 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext) {
   const historyOpponentWeight = weighAgainstHistory(opponentCounts, historyContext.opponentWeights);
 
   /*
-   * Sit-outs are fairest measured over the whole term, not one evening. We
-   * add tonight's sit-outs to those already on record and level THAT, which
-   * is what favours someone who has been benched a lot lately.
+   * Sit-outs are fairest measured over the whole term, not one evening, and
+   * as a RATE rather than a total — see HISTORY_MIN_SESSIONS_FOR_OWN_RATE.
+   * We work out what each player's rate would become if tonight went as this
+   * schedule proposes, and level THAT. Somebody sitting out often per night
+   * is therefore favoured to play, however rarely she comes.
    *
-   * With no saved history this is skipped entirely — every past total would
-   * be zero, so the sum would just be tonight's imbalance counted a second
-   * time on top of PENALTY_SITOUT_IMBALANCE.
+   * When everyone's baseline rate is identical this is skipped entirely,
+   * because then the spread is just tonight's imbalance divided down — the
+   * same thing PENALTY_SITOUT_IMBALANCE already charges for, counted twice
+   * while telling us nothing about the past.
+   *
+   * That covers more than the no-history case. A section with only one or two
+   * saved nights puts everybody on the section average, since nobody can have
+   * reached HISTORY_MIN_SESSIONS_FOR_OWN_RATE yet, and so does a night where
+   * none of the players present appear in the record.
    */
-  let cumulativeSitOutSpread = 0;
-  if (historyContext.sessionsUsed > 0) {
-    let highestTotal = -Infinity;
-    let lowestTotal = Infinity;
+  let sitOutRateSpread = 0;
+  if (historyContext.baselineRatesDiffer) {
+    let highestRate = -Infinity;
+    let lowestRate = Infinity;
 
     for (let index = 0; index < playerCount; index++) {
-      const lifetimeSitOuts = historyContext.pastSitOuts[index] + schedule.sitOutTally[index];
-      if (lifetimeSitOuts > highestTotal) highestTotal = lifetimeSitOuts;
-      if (lifetimeSitOuts < lowestTotal) lowestTotal = lifetimeSitOuts;
+      const rate = rateIncludingTonight(
+        historyContext.sitOutRateBaselines[index], schedule.sitOutTally[index]);
+      if (rate > highestRate) highestRate = rate;
+      if (rate < lowestRate) lowestRate = rate;
     }
 
-    cumulativeSitOutSpread = highestTotal - lowestTotal;
+    sitOutRateSpread = highestRate - lowestRate;
   }
 
   const score =
@@ -1445,7 +1572,7 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext) {
     + sameCourtInARow    * PENALTY_SAME_COURT_IN_A_ROW
     + historyPartnerWeight  * PENALTY_HISTORY_PARTNER
     + historyOpponentWeight * PENALTY_HISTORY_OPPONENT
-    + cumulativeSitOutSpread * PENALTY_HISTORY_SITOUT_SPREAD;
+    + sitOutRateSpread * PENALTY_HISTORY_SITOUT_RATE_SPREAD;
 
   return {
     score: score,
@@ -1459,7 +1586,7 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext) {
     leastSitOuts: leastSitOuts,
     historyPartnerWeight: historyPartnerWeight,
     historyOpponentWeight: historyOpponentWeight,
-    cumulativeSitOutSpread: cumulativeSitOutSpread,
+    sitOutRateSpread: sitOutRateSpread,
     historySessionsUsed: historyContext.sessionsUsed
   };
 }
@@ -1814,7 +1941,8 @@ function renderStats(result, layoutText) {
       "Repeated opponents from past sessions: " +
       describeHistoryWeight(report.historyOpponentWeight)));
     historyList.appendChild(createElement("li", null,
-      "Spread in sit-outs counting history: " + report.cumulativeSitOutSpread));
+      "Spread in sit-outs per session counting history: " +
+      report.sitOutRateSpread.toFixed(2)));
     box.appendChild(historyList);
   }
 
