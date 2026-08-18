@@ -78,8 +78,10 @@
   }
 
   .hint { font-weight: 400; font-size: 15px; color: #333; }
+  /* A hint that has nothing to say shouldn't still take up its margin. */
+  .hint:empty { display: none; }
 
-  input[type="number"], input[type="text"], select {
+  input[type="number"], input[type="text"], input[type="time"], select {
     width: 100%;
     font-family: inherit;
     font-size: 18px;
@@ -369,6 +371,58 @@
     opacity: 0.4;
   }
 
+  /* ---------- Round times and the clock ---------- */
+  /* The arrows flank the dropdown so the coordinator can nudge the round
+     without opening a menu — the commonest thing they do all evening. */
+  .round-picker-row { display: flex; gap: 8px; align-items: stretch; }
+  .round-picker-row select { flex: 1 1 auto; }
+  .round-picker-row button {
+    width: auto;
+    flex: 0 0 auto;
+    min-width: 56px;
+    min-height: 48px;
+    font-size: 22px;
+    padding: 8px;
+  }
+  .round-picker-row button:disabled { opacity: 0.4; }
+
+  .round-window-list {
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    padding: 4px 14px;
+    margin-bottom: 18px;
+  }
+
+  .round-window {
+    display: flex;
+    justify-content: space-between;
+    gap: 14px;
+    min-height: 44px;
+    align-items: center;
+    border-bottom: 1px solid #ddd;
+    font-size: 16px;
+  }
+  .round-window:last-child { border-bottom: none; }
+  .round-window.playing-now { font-weight: 700; }
+
+  .round-window-summary { font-size: 16px; margin: 0 0 8px; }
+
+  .timer-display {
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    padding: 14px;
+    margin-bottom: 14px;
+  }
+  .timer-round { font-size: 19px; font-weight: 700; margin: 0; }
+  /* Tabular figures stop the countdown jiggling as the digits change. */
+  .timer-remaining {
+    font-size: 40px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    margin: 2px 0;
+  }
+  .timer-note { font-size: 16px; color: #333; margin: 0; }
+
   /* ---------- History screen ---------- */
   /* The save button sits under the stats, away from Generate, so the two
      are never confused for one another. */
@@ -478,12 +532,30 @@
 
   <div class="number-fields">
     <div class="field">
+      <label for="startTime">Start time</label>
+      <input type="time" id="startTime">
+    </div>
+    <div class="field">
+      <label for="endTime">End time</label>
+      <input type="time" id="endTime">
+    </div>
+    <div class="field">
+      <label for="roundMinutes">Minutes per round</label>
+      <input type="number" id="roundMinutes" value="18" min="1" max="120">
+    </div>
+  </div>
+
+  <div id="roundSchedule"></div>
+
+  <div class="number-fields">
+    <div class="field">
       <label for="numCourts">Number of courts</label>
       <input type="number" id="numCourts" value="4" min="1" max="20">
     </div>
     <div class="field">
       <label for="numRounds">Number of rounds</label>
       <input type="number" id="numRounds" value="5" min="1" max="30">
+      <p class="hint" id="numRoundsHint"></p>
     </div>
     <div class="field">
       <label for="playersPerCourt">Players per court</label>
@@ -492,10 +564,25 @@
   </div>
 
   <div class="field">
+    <div id="timerDisplay"></div>
+    <div class="button-row">
+      <button class="secondary" id="startTimerButton" type="button">Start the clock</button>
+      <button class="secondary" id="stopTimerButton" type="button" hidden>Stop the clock</button>
+    </div>
+  </div>
+
+  <div class="field">
     <label for="currentRoundPicker">Round being played now</label>
-    <select id="currentRoundPicker"></select>
+    <div class="round-picker-row">
+      <button class="secondary arrow" id="previousRoundButton" type="button"
+              aria-label="Previous round">&#8592;</button>
+      <select id="currentRoundPicker"></select>
+      <button class="secondary arrow" id="nextRoundButton" type="button"
+              aria-label="Next round">&#8594;</button>
+    </div>
     <p class="hint">Set this as the evening goes on. Earlier rounds count as
-      played, and &ldquo;Regenerate from here&rdquo; leaves them alone.</p>
+      played, and &ldquo;Regenerate from here&rdquo; leaves them alone. Moving
+      it by hand puts you in charge for the rest of the night.</p>
   </div>
 
   <div class="field">
@@ -3709,6 +3796,9 @@ function renderCurrentRoundPicker() {
     currentRoundPicker.appendChild(option);
   }
   currentRoundPicker.value = String(currentRound);
+
+  document.getElementById("previousRoundButton").disabled = currentRound <= 1;
+  document.getElementById("nextRoundButton").disabled = currentRound >= roundCount;
 }
 
 /**
@@ -3723,23 +3813,394 @@ function updateRegenerateButton() {
     : "Regenerate from round " + currentRound;
 }
 
-currentRoundPicker.addEventListener("change", function () {
-  currentRound = parseInt(currentRoundPicker.value, 10) || 1;
-  // The "out from round N" buttons all name the round after this one.
-  refreshAvailabilityControls();
-  updateRegenerateButton();
-});
-
-// "input" rather than "change": every availability control lists the rounds
-// by name, so they are stale the moment the number is edited.
-document.getElementById("numRounds").addEventListener("input", function () {
+/**
+ * Everything that has to follow the round count around.
+ *
+ * The count can change from three directions — the coordinator types in the
+ * box, the session times work it out, or the evening is stretched — and all
+ * three need the same tidying up afterwards, so they share this.
+ */
+function applyRoundCountChange() {
   const roundCount = getRoundCount();
   stretchAvailabilityToRoundCount(roundCountLastSeen, roundCount);
   roundCountLastSeen = roundCount;
   renderCurrentRoundPicker();
   refreshAvailabilityControls();
   updateRegenerateButton();
+}
+
+/**
+ * A round change the coordinator made themselves, from the dropdown or the
+ * arrows. This is the moment the clock loses its say — see the note on
+ * `coordinatorSetRoundByHand` below.
+ */
+function setCurrentRoundByHand(round) {
+  const roundCount = getRoundCount();
+  if (round < 1 || round > roundCount) return;
+
+  currentRound = round;
+  coordinatorSetRoundByHand = true;
+
+  renderCurrentRoundPicker();
+  renderRoundSchedule();
+  refreshAvailabilityControls();
+  updateRegenerateButton();
+  renderTimer();
+}
+
+currentRoundPicker.addEventListener("change", function () {
+  setCurrentRoundByHand(parseInt(currentRoundPicker.value, 10) || 1);
 });
+
+document.getElementById("previousRoundButton").addEventListener("click", function () {
+  setCurrentRoundByHand(currentRound - 1);
+});
+
+document.getElementById("nextRoundButton").addEventListener("click", function () {
+  setCurrentRoundByHand(currentRound + 1);
+});
+
+// "input" rather than "change": every availability control lists the rounds
+// by name, so they are stale the moment the number is edited.
+document.getElementById("numRounds").addEventListener("input", applyRoundCountChange);
+
+
+/* =========================================================================
+   SESSION TIMES, THE ROUND SCHEDULE AND THE CLOCK
+
+   The coordinator gives a start time, an end time and how long a round runs.
+   From those we work out how many whole rounds fit and when each one is.
+   A Start button then counts down through them.
+
+   The clock is ADVISORY. It offers to move the round on; it never insists.
+   Real evenings overrun — a court is wet, a game goes to deuce five times,
+   somebody's shoelace — and when that happens the person standing on the
+   court knows better than the arithmetic does.
+   ========================================================================= */
+
+const DEFAULT_ROUND_MINUTES = 18;
+
+/** "17:30" to 1050, minutes since midnight. Null if the box is blank or odd. */
+function parseTimeOfDay(text) {
+  const match = /^(\d{1,2}):(\d{2})$/.exec((text || "").trim());
+  if (match === null) return null;
+
+  const hours = parseInt(match[1], 10);
+  const minutes = parseInt(match[2], 10);
+  if (hours > 23 || minutes > 59) return null;
+
+  return hours * 60 + minutes;
+}
+
+/** 1050 back to "5:30 pm". Wraps, so an evening running past midnight reads. */
+function formatTimeOfDay(minutesSinceMidnight) {
+  const wrapped = ((Math.round(minutesSinceMidnight) % 1440) + 1440) % 1440;
+  const hours24 = Math.floor(wrapped / 60);
+  const minutes = wrapped % 60;
+  const hours12 = hours24 % 12 === 0 ? 12 : hours24 % 12;
+
+  return hours12 + ":" + String(minutes).padStart(2, "0") +
+         (hours24 < 12 ? " am" : " pm");
+}
+
+/**
+ * "5:00 – 5:18 pm". The am/pm is said once when both ends agree, because a
+ * column of "5:00 pm – 5:18 pm" is mostly repetition. Across noon or midnight
+ * they disagree and both are spelled out.
+ */
+function formatTimeWindow(startMinutes, endMinutes) {
+  const from = formatTimeOfDay(startMinutes);
+  const to = formatTimeOfDay(endMinutes);
+  const sameHalfOfDay = from.slice(-2) === to.slice(-2);
+
+  return (sameHalfOfDay ? from.slice(0, -3) : from) + " \u2013 " + to;
+}
+
+/** Seconds as "7:42", for a countdown. Never goes below zero. */
+function formatCountdown(totalSeconds) {
+  const safe = Math.max(0, Math.ceil(totalSeconds));
+  return Math.floor(safe / 60) + ":" + String(safe % 60).padStart(2, "0");
+}
+
+/** The clock window for each round, given when the first one starts. */
+function buildRoundWindows(startMinutes, roundMinutes, roundCount) {
+  const windows = [];
+  for (let round = 1; round <= roundCount; round++) {
+    windows.push({
+      roundNumber: round,
+      startMinutes: startMinutes + (round - 1) * roundMinutes,
+      endMinutes: startMinutes + round * roundMinutes
+    });
+  }
+  return windows;
+}
+
+/**
+ * How many whole rounds fit between two times, and what is left over.
+ *
+ * Whole rounds only, always rounding down. Twelve spare minutes are reported
+ * as twelve spare minutes, never squeezed out as a twelve-minute round with
+ * an eighteen-minute label — the people in that round would get two thirds of
+ * the court time everyone else got, and nothing on screen would say so.
+ */
+function computeRoundSchedule(startMinutes, endMinutes, roundMinutes) {
+  if (startMinutes === null || endMinutes === null) return null;
+  if (!Number.isFinite(roundMinutes) || roundMinutes <= 0) return null;
+
+  // An end time at or before the start is read as running past midnight,
+  // which is a friendlier answer than refusing a session that ends at 00:30.
+  const lengthMinutes = endMinutes > startMinutes
+    ? endMinutes - startMinutes
+    : endMinutes + 1440 - startMinutes;
+
+  const roundCount = Math.floor(lengthMinutes / roundMinutes);
+
+  return {
+    roundCount: roundCount,
+    spareMinutes: lengthMinutes - roundCount * roundMinutes,
+    roundMinutes: roundMinutes,
+    lengthMinutes: lengthMinutes,
+    startMinutes: startMinutes,
+    windows: buildRoundWindows(startMinutes, roundMinutes, roundCount)
+  };
+}
+
+/** The schedule the three time boxes currently describe, or null. */
+function readRoundSchedule() {
+  return computeRoundSchedule(
+    parseTimeOfDay(document.getElementById("startTime").value),
+    parseTimeOfDay(document.getElementById("endTime").value),
+    readNumberInput("roundMinutes", DEFAULT_ROUND_MINUTES));
+}
+
+/* ---------- The clock ---------- */
+
+/** Wall-clock milliseconds at the moment Start was pressed; null when idle. */
+let clockStartedAtMs = null;
+
+/** The repeating tick, so it can be stopped again. */
+let clockHandle = null;
+
+/**
+ * Set the first time the coordinator moves the round themselves, and never
+ * cleared until the clock is restarted. This is the whole of the advisory
+ * rule: while it is false the tick may move the round, and once it is true
+ * the tick may only report what it thinks.
+ */
+let coordinatorSetRoundByHand = false;
+
+/**
+ * The rounds as they are ACTUALLY running.
+ *
+ * The clock is anchored to the moment Start was pressed rather than to the
+ * booked start time, because sessions begin late far more often than they
+ * begin on time, and a coordinator pressing Start at twenty past should get a
+ * full first round — not be told they are already into round two. The round
+ * count stays exactly as planned; only the windows slide.
+ */
+function liveRoundWindows() {
+  const planned = readRoundSchedule();
+  const roundCount = getRoundCount();
+  const roundMinutes = readNumberInput("roundMinutes", DEFAULT_ROUND_MINUTES);
+
+  if (clockStartedAtMs === null) {
+    return planned === null ? null : planned.windows;
+  }
+
+  const started = new Date(clockStartedAtMs);
+  return buildRoundWindows(
+    started.getHours() * 60 + started.getMinutes(), roundMinutes, roundCount);
+}
+
+/** Which round the clock reckons it is, and how far through. Null when idle. */
+function readClock() {
+  if (clockStartedAtMs === null) return null;
+
+  const roundSeconds = readNumberInput("roundMinutes", DEFAULT_ROUND_MINUTES) * 60;
+  const roundCount = getRoundCount();
+  const elapsedSeconds = (Date.now() - clockStartedAtMs) / 1000;
+  const roundsElapsed = Math.floor(elapsedSeconds / roundSeconds);
+
+  return {
+    finished: roundsElapsed >= roundCount,
+    roundNumber: Math.min(roundCount, roundsElapsed + 1),
+    secondsLeftInRound: roundSeconds - (elapsedSeconds - roundsElapsed * roundSeconds),
+    roundCount: roundCount
+  };
+}
+
+function startClock() {
+  clockStartedAtMs = Date.now();
+
+  // Starting the clock afresh is the coordinator handing it the reins back.
+  coordinatorSetRoundByHand = false;
+
+  if (clockHandle !== null) clearInterval(clockHandle);
+  clockHandle = setInterval(onClockTick, 1000);
+
+  document.getElementById("startTimerButton").hidden = true;
+  document.getElementById("stopTimerButton").hidden = false;
+
+  onClockTick();
+  renderRoundSchedule();
+}
+
+function stopClock() {
+  if (clockHandle !== null) clearInterval(clockHandle);
+  clockHandle = null;
+  clockStartedAtMs = null;
+
+  document.getElementById("startTimerButton").hidden = false;
+  document.getElementById("stopTimerButton").hidden = true;
+
+  renderRoundSchedule();
+  renderTimer();
+}
+
+/**
+ * One second of clock.
+ *
+ * Elapsed time is measured against the wall clock every tick rather than by
+ * counting ticks, because a phone that sleeps in a coordinator's pocket stops
+ * firing intervals and a counter would come back minutes behind.
+ */
+function onClockTick() {
+  const clock = readClock();
+  if (clock === null) return;
+
+  if (!coordinatorSetRoundByHand && clock.roundNumber !== currentRound) {
+    currentRound = clock.roundNumber;
+    renderCurrentRoundPicker();
+    renderRoundSchedule();
+    refreshAvailabilityControls();
+    updateRegenerateButton();
+  }
+
+  renderTimer();
+}
+
+/* ---------- Drawing the two panels ---------- */
+
+/** The list of round windows, with whichever round is being played marked. */
+function renderRoundSchedule() {
+  const container = document.getElementById("roundSchedule");
+  const hint = document.getElementById("numRoundsHint");
+  const roundsBox = document.getElementById("numRounds");
+  emptyElement(container);
+
+  const schedule = readRoundSchedule();
+  if (schedule === null) {
+    // No times given, so the rounds box is the coordinator's to set.
+    roundsBox.disabled = false;
+    hint.textContent = "";
+    return;
+  }
+
+  if (schedule.roundCount === 0) {
+    roundsBox.disabled = false;
+    hint.textContent = "";
+    showNotice(container, "No full round of " + schedule.roundMinutes +
+      " minutes fits into those times — there are only " +
+      schedule.lengthMinutes + " minutes between them.", "error");
+    return;
+  }
+
+  // The times have answered the question, so the manual box stops taking
+  // instructions rather than sitting there contradicting them.
+  roundsBox.disabled = true;
+  hint.textContent = "Worked out from the times above.";
+
+  let summary = schedule.roundCount + (schedule.roundCount === 1 ? " round" : " rounds") +
+                " of " + schedule.roundMinutes + " minutes";
+  if (schedule.spareMinutes > 0) {
+    summary += ", " + schedule.spareMinutes + " minute" +
+               (schedule.spareMinutes === 1 ? "" : "s") + " spare";
+  }
+  container.appendChild(createElement("p", "round-window-summary", summary + "."));
+
+  const windows = liveRoundWindows() || schedule.windows;
+  const list = createElement("div", "round-window-list");
+  for (const roundWindow of windows) {
+    const row = createElement("div", "round-window" +
+      (roundWindow.roundNumber === currentRound ? " playing-now" : ""));
+    row.appendChild(createElement("span", null, "Round " + roundWindow.roundNumber));
+    row.appendChild(createElement("span", null,
+      formatTimeWindow(roundWindow.startMinutes, roundWindow.endMinutes)));
+    list.appendChild(row);
+  }
+  container.appendChild(list);
+}
+
+/** The live countdown. Silent until the clock is running. */
+function renderTimer() {
+  const panel = document.getElementById("timerDisplay");
+  emptyElement(panel);
+
+  const clock = readClock();
+  if (clock === null) return;
+
+  const box = createElement("div", "timer-display");
+
+  if (clock.finished) {
+    box.appendChild(createElement("p", "timer-round",
+      "The clock has run through all " + clock.roundCount + " rounds."));
+
+    // Running out of time is not the same as having played every round. If
+    // the coordinator is still behind, say so rather than declaring the
+    // evening over on their behalf.
+    if (currentRound < clock.roundCount) {
+      box.appendChild(createElement("p", "timer-note",
+        "You are still on round " + currentRound + ", which is where it stays " +
+        "until you move it."));
+    }
+    panel.appendChild(box);
+    return;
+  }
+
+  // The headline names the round the coordinator is on, which is not always
+  // the one the clock is on — and when they differ, that is worth saying.
+  box.appendChild(createElement("p", "timer-round",
+    "Round " + currentRound + " of " + clock.roundCount));
+  box.appendChild(createElement("p", "timer-remaining",
+    formatCountdown(clock.secondsLeftInRound) + " left"));
+
+  const windows = liveRoundWindows();
+  const nextWindow = windows === null ? null : windows[clock.roundNumber];
+
+  if (coordinatorSetRoundByHand) {
+    box.appendChild(createElement("p", "timer-note",
+      "You moved the round by hand, so the clock is only advising from here " +
+      "on. It has reached round " + clock.roundNumber + "."));
+  } else if (nextWindow !== null && nextWindow !== undefined) {
+    box.appendChild(createElement("p", "timer-note",
+      "Round " + nextWindow.roundNumber + " begins at " +
+      formatTimeOfDay(nextWindow.startMinutes) + "."));
+  } else {
+    box.appendChild(createElement("p", "timer-note", "This is the last round."));
+  }
+
+  panel.appendChild(box);
+}
+
+/**
+ * The times changing means a different number of rounds, which everything
+ * from availability to the regenerate button needs to hear about.
+ */
+function handleSessionTimesChange() {
+  const schedule = readRoundSchedule();
+  if (schedule !== null && schedule.roundCount > 0) {
+    document.getElementById("numRounds").value = String(schedule.roundCount);
+  }
+  applyRoundCountChange();
+  renderRoundSchedule();
+  renderTimer();
+}
+
+document.getElementById("startTime").addEventListener("input", handleSessionTimesChange);
+document.getElementById("endTime").addEventListener("input", handleSessionTimesChange);
+document.getElementById("roundMinutes").addEventListener("input", handleSessionTimesChange);
+document.getElementById("startTimerButton").addEventListener("click", startClock);
+document.getElementById("stopTimerButton").addEventListener("click", stopClock);
 
 sectionPicker.addEventListener("change", function () {
   // Changing section means setting up a different evening, so borrowed
@@ -4849,6 +5310,7 @@ tabHistory.addEventListener("click", function () {
 renderSectionPicker();
 roundCountLastSeen = getRoundCount();
 renderCurrentRoundPicker();
+renderRoundSchedule();
 updateRegenerateButton();
 renderAttendanceList();
 renderOtherSectionList();
