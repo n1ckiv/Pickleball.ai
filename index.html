@@ -3765,6 +3765,47 @@ function playersForRegeneration(previousPlayers) {
   return players;
 }
 
+/** Numbers in prose: "3", "1 and 2", "3, 4 and 5". No "round" prefix. */
+function joinNumbers(numbers) {
+  if (numbers.length === 1) return String(numbers[0]);
+
+  const last = numbers[numbers.length - 1];
+  return numbers.slice(0, -1).join(", ") + " and " + last;
+}
+
+/** The whole numbers from first to last, inclusive. */
+function countUpTo(firstNumber, lastNumber) {
+  const numbers = [];
+  for (let number = firstNumber; number <= lastNumber; number++) numbers.push(number);
+  return numbers;
+}
+
+/**
+ * The question asked before a regeneration.
+ *
+ * It names both halves — what is about to change and what is safe — because
+ * the button alone cannot say that, and the coordinator may well have read
+ * the next round out to people already. Being told a different game is coming
+ * is a small annoyance; discovering it on court is not.
+ */
+function describeRegeneration(roundCount) {
+  if (currentRound === 1) {
+    return "Rebuild the whole evening — all " + roundCount + " rounds?\n\n" +
+           "Every round is replaced, including any you have already read out.";
+  }
+
+  const rebuilt = countUpTo(currentRound, roundCount);
+  const kept = countUpTo(1, currentRound - 1);
+
+  return "Rebuild " + (rebuilt.length === 1 ? "round " : "rounds ") +
+         joinNumbers(rebuilt) + "?\n\n" +
+         (kept.length === 1
+            ? "Round " + joinNumbers(kept) + " stays exactly as it is."
+            : "Rounds " + joinNumbers(kept) + " stay exactly as they are.") +
+         " Anyone you have already told about round " + currentRound +
+         " will get a different game.";
+}
+
 function handleRegenerateClick() {
   if (lastGeneratedSession === null) {
     clearScreen();
@@ -3772,6 +3813,11 @@ function handleRegenerateClick() {
               "rest of it around who is actually still on court.");
     return;
   }
+
+  // Regenerating throws away games the coordinator may already have read out,
+  // and there is no undo, so ask first. Generate is not guarded this way:
+  // there is nothing to lose until a schedule exists.
+  if (!window.confirm(describeRegeneration(getRoundCount()))) return;
 
   // Read before clearScreen, which throws the previous session away.
   const previous = lastGeneratedSession;
