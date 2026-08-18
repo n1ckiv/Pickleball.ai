@@ -245,6 +245,7 @@
   .notice.success { border-color: var(--accent); background: #ddf3e4; }
   .notice p { margin: 0 0 8px; }
   .notice p:last-child { margin-bottom: 0; }
+  .notice ul { margin: 8px 0; padding-left: 22px; }
 
   /* ---------- Results ---------- */
   .stats {
@@ -584,6 +585,50 @@
       played, and &ldquo;Regenerate from here&rdquo; leaves them alone. Moving
       it by hand puts you in charge for the rest of the night.</p>
   </div>
+
+  <details class="drawer">
+    <summary>Court requests</summary>
+    <div class="drawer-body">
+      <p class="hint">Somebody asked to be on with somebody else. Tonight only —
+        never saved to the roster, and cleared when you change section or save
+        the session.</p>
+
+      <div class="field">
+        <label for="pinRoundPicker">Round</label>
+        <select id="pinRoundPicker"></select>
+      </div>
+
+      <div class="field">
+        <label>What was asked for</label>
+        <div class="check-list radio-row">
+          <label class="check-row"><input type="radio" name="pinKind" value="group" checked> Just together</label>
+          <label class="check-row"><input type="radio" name="pinKind" value="teams"> These teams</label>
+        </div>
+        <p class="hint">&ldquo;Just together&rdquo; leaves the pairings to the
+          generator, which is nearly always what was meant. Only name the teams
+          if the teams are what you promised.</p>
+      </div>
+
+      <div class="field">
+        <label>Who is on together</label>
+        <div id="pinPlayerList"></div>
+      </div>
+
+      <div class="field">
+        <label for="pinCourtNumber">Court number
+          <span class="hint">&mdash; leave blank for any court.</span></label>
+        <input type="number" id="pinCourtNumber" min="1" max="20">
+      </div>
+
+      <div id="pinFormMessage"></div>
+
+      <div class="button-row">
+        <button class="secondary" id="addPinButton" type="button">Add request</button>
+      </div>
+
+      <div id="pinList"></div>
+    </div>
+  </details>
 
   <div class="field">
     <button id="generateButton" type="button">Generate schedule</button>
@@ -1325,6 +1370,113 @@ let borrowedPlayerIds = new Set();
 let guests = [];
 let nextGuestNumber = 1;
 
+/**
+ * COORDINATOR COURT REQUESTS — tonight only, and memory only.
+ *
+ * A request is something the coordinator has already promised out loud: "you
+ * four are on together in round three." It is therefore a HARD constraint of
+ * the same standing as a keep-apart pair, not one more preference for the
+ * search to weigh against the others.
+ *
+ * A request holds ONLY what was actually asked for, at one of three levels:
+ *
+ *   playerIds    the people involved — always
+ *   teams        [[ids], [ids]] when the sides were named, otherwise null
+ *   courtNumber  a 1-based court, when one was named, otherwise null
+ *
+ * The null-by-default part is the whole point. "Put these four on together"
+ * has three different ways of splitting them into teams and any of the courts
+ * to do it on; recording a split nobody asked for would throw away choices the
+ * generator is entitled to make, and would hand back a schedule that is worse
+ * than it needed to be for no reason anyone could see.
+ *
+ * Never written to the roster and never saved. A request belongs to one
+ * evening, so it is cleared when the section changes or the session is saved.
+ */
+let courtPins = [];
+let nextPinNumber = 1;
+
+function clearCourtPins() {
+  courtPins = [];
+}
+
+/** A player's name, whether they are on the roster or a walk-in guest. */
+function nameOfPlayerId(playerId) {
+  const savedPlayer = findPlayer(playerId);
+  if (savedPlayer !== null) return savedPlayer.name;
+
+  const guest = guests.find(function (one) { return one.id === playerId; });
+  return guest === undefined ? "somebody no longer on the list" : guest.name;
+}
+
+/** "Ann", "Ann and Ben", "Ann, Ben and Cara". */
+function joinNames(names) {
+  if (names.length === 0) return "";
+  if (names.length === 1) return names[0];
+  return names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+}
+
+/** One request, in the words the coordinator would use for it. */
+function describeCourtPin(pin) {
+  const where = pin.courtNumber === null ? "" : " on court " + pin.courtNumber;
+
+  if (pin.teams !== null) {
+    return "Round " + pin.roundNumber + ": " +
+           pin.teams[0].map(nameOfPlayerId).join(" & ") + " v " +
+           pin.teams[1].map(nameOfPlayerId).join(" & ") + where + ".";
+  }
+
+  return "Round " + pin.roundNumber + ": " +
+         joinNames(pin.playerIds.map(nameOfPlayerId)) +
+         " on the same court" + where + ", teams left open.";
+}
+
+/**
+ * Turns tonight's requests into the shape the generator works in.
+ *
+ * Past this point people are identified by their position in tonight's list
+ * rather than by their saved id, so the lookup happens once, here. Anyone the
+ * request names who is not playing tonight is reported back in `missingIds`
+ * rather than quietly dropped: a request for four people that has silently
+ * become a request for three is no longer the request that was made.
+ */
+function resolveCourtPins(players) {
+  const playerById = new Map();
+  for (const player of players) playerById.set(player.id, player);
+
+  function lookUp(ids) {
+    return ids
+      .map(function (id) { return playerById.get(id); })
+      .filter(function (player) { return player !== undefined; });
+  }
+
+  return courtPins.map(function (pin) {
+    return {
+      pin: pin,
+      roundNumber: pin.roundNumber,
+      courtNumber: pin.courtNumber,
+      players: lookUp(pin.playerIds),
+      missingIds: pin.playerIds.filter(function (id) { return !playerById.has(id); }),
+      teams: pin.teams === null ? null : pin.teams.map(lookUp)
+    };
+  });
+}
+
+/**
+ * Hands each round still to be built the requests that apply to it.
+ *
+ * Rounds already played are not in `sessionPlan.rounds` at all, so a request
+ * for one of them simply never reaches the generator — which is exactly what
+ * "regenerate from round 3" should mean for a request about round 2.
+ */
+function attachPinsToSessionPlan(sessionPlan, resolvedPins) {
+  for (const plan of sessionPlan.rounds) {
+    plan.pins = resolvedPins.filter(function (pin) {
+      return pin.roundNumber === plan.roundNumber;
+    });
+  }
+}
+
 /* ---------- Who is here, round by round ---------- */
 
 /**
@@ -1754,6 +1906,60 @@ function splitIntoTeams(courtPlayers) {
   };
 }
 
+/**
+ * One requested court.
+ *
+ * A request that named the sides is built exactly as asked. One that only
+ * asked for four people to be on together is SHUFFLED before it is split, so
+ * that across the thousands of attempts every way of pairing them up is tried
+ * and the search picks the pairing that costs the rest of the night least.
+ * Splitting the stored order would fix the teams by accident and turn a
+ * request to be "on together" into a request nobody made.
+ */
+function buildPinnedCourt(pin) {
+  if (pin.teams !== null) {
+    return { teamOne: pin.teams[0].slice(), teamTwo: pin.teams[1].slice() };
+  }
+  return splitIntoTeams(shuffleArray(pin.players));
+}
+
+/**
+ * Fills the courts for one round: the requested groups first, then everyone
+ * else dealt into whatever is left.
+ *
+ * A request that named a court gets that court. One that did not is put on a
+ * RANDOM free court of the right size rather than the first one, because the
+ * court number is itself scored — staying on the same court two rounds running
+ * costs points — and always taking the lowest would hide that choice from the
+ * search. Sizes are checked before we ever get here, in checkPinProblems.
+ */
+function dealCourts(courtSizes, playing, pins) {
+  const courts = courtSizes.map(function () { return null; });
+
+  for (const pin of pins) {
+    if (pin.courtNumber !== null) courts[pin.courtNumber - 1] = buildPinnedCourt(pin);
+  }
+
+  for (const pin of pins) {
+    if (pin.courtNumber !== null) continue;
+
+    const free = [];
+    courtSizes.forEach(function (size, position) {
+      if (courts[position] === null && size === pin.players.length) free.push(position);
+    });
+    courts[free[Math.floor(Math.random() * free.length)]] = buildPinnedCourt(pin);
+  }
+
+  let nextPlayer = 0;
+  courtSizes.forEach(function (size, position) {
+    if (courts[position] !== null) return;
+    courts[position] = splitIntoTeams(playing.slice(nextPlayer, nextPlayer + size));
+    nextPlayer += size;
+  });
+
+  return courts;
+}
+
 /** Everyone on a court in this round, both teams, all courts. */
 function listPlayersOnCourt(round) {
   const onCourt = [];
@@ -1828,27 +2034,40 @@ function buildRandomSchedule(players, sessionPlan) {
   }
 
   for (const plan of sessionPlan.rounds) {
+    const pins = plan.pins === undefined ? [] : plan.pins;
+
+    /*
+     * Anyone in a court request is taken out of the bench draw BEFORE it
+     * happens, rather than being placed and then charged for afterwards. A
+     * request the coordinator has already made out loud is not a preference to
+     * be traded off against sit-out fairness; it is a fact the rest of the
+     * round has to be arranged around, like a keep-apart pair.
+     */
+    const pinnedIndexes = new Set();
+    for (const pin of pins) {
+      for (const player of pin.players) pinnedIndexes.add(player.index);
+    }
+
+    const benchCandidates = pinnedIndexes.size === 0
+      ? plan.available
+      : plan.available.filter(function (p) { return !pinnedIndexes.has(p.index); });
+
     // chooseSitOuts adds to sitOutTally itself; these are the ones we chose.
-    const sitOuts = chooseSitOuts(plan.available, sitOutTally, plan.shape.sitOutCount);
+    const sitOuts = chooseSitOuts(benchCandidates, sitOutTally, plan.shape.sitOutCount);
     for (const player of sitOuts) {
       benchedTally[player.index] += 1;
     }
 
     const sittingOutIndexes = new Set(sitOuts.map(function (p) { return p.index; }));
     const playing = shuffleArray(plan.available.filter(function (p) {
-      return !sittingOutIndexes.has(p.index);
+      return !sittingOutIndexes.has(p.index) && !pinnedIndexes.has(p.index);
     }));
 
-    // Deal the shuffled players into the courts, in order.
-    const courts = [];
-    let nextPlayer = 0;
-    for (const size of plan.shape.courtSizes) {
-      const courtPlayers = playing.slice(nextPlayer, nextPlayer + size);
-      nextPlayer += size;
-      courts.push(splitIntoTeams(courtPlayers));
-    }
-
-    rounds.push({ courts: courts, sitOuts: sitOuts, absent: plan.absent });
+    rounds.push({
+      courts: dealCourts(plan.shape.courtSizes, playing, pins),
+      sitOuts: sitOuts,
+      absent: plan.absent
+    });
   }
 
   return { rounds: rounds, sitOutTally: sitOutTally, benchedTally: benchedTally };
@@ -1960,6 +2179,71 @@ function findConflictViolations(schedule, conflictKeys) {
       }
     });
   });
+
+  return violations;
+}
+
+/** The people on one court, as a set of positions in tonight's list. */
+function indexSetOf(players) {
+  return new Set(players.map(function (player) { return player.index; }));
+}
+
+/** True when these two sets hold exactly the same people. */
+function sameIndexSet(one, two) {
+  if (one.size !== two.size) return false;
+  for (const index of one) {
+    if (!two.has(index)) return false;
+  }
+  return true;
+}
+
+/** True when a court's two sides are the two requested sides, either way round. */
+function teamsMatchRequest(court, wantedTeams) {
+  const one = indexSetOf(court.teamOne);
+  const two = indexSetOf(court.teamTwo);
+  const wantedOne = indexSetOf(wantedTeams[0]);
+  const wantedTwo = indexSetOf(wantedTeams[1]);
+
+  return (sameIndexSet(one, wantedOne) && sameIndexSet(two, wantedTwo)) ||
+         (sameIndexSet(one, wantedTwo) && sameIndexSet(two, wantedOne));
+}
+
+/**
+ * Checks a schedule against every court request, and says what went wrong.
+ *
+ * The huge penalty steers the search, but a search can only choose between the
+ * candidates it was given: if none of them met a request, the best of a bad
+ * lot still wins. So the winner is examined afterwards and the coordinator is
+ * told plainly, rather than handed a sheet that quietly ignores a promise they
+ * have already made to somebody.
+ *
+ * Each request is checked only as far as it was specified. A group request is
+ * met the moment those people share a court, whatever the teams turn out to be.
+ */
+function findPinViolations(schedule, resolvedPins) {
+  const violations = [];
+  if (resolvedPins.length === 0) return violations; // nothing to check, exit early
+
+  for (const pin of resolvedPins) {
+    const round = schedule.rounds[pin.roundNumber - 1];
+    const wanted = indexSetOf(pin.players);
+
+    let foundAt = -1;
+    round.courts.forEach(function (court, position) {
+      if (sameIndexSet(indexSetOf(court.teamOne.concat(court.teamTwo)), wanted)) {
+        foundAt = position;
+      }
+    });
+
+    if (foundAt === -1) {
+      violations.push({ pin: pin.pin, reason: "they were not all put on one court" });
+    } else if (pin.courtNumber !== null && foundAt !== pin.courtNumber - 1) {
+      violations.push({ pin: pin.pin, reason: "they ended up on court " +
+        (foundAt + 1) + " rather than court " + pin.courtNumber });
+    } else if (pin.teams !== null && !teamsMatchRequest(round.courts[foundAt], pin.teams)) {
+      violations.push({ pin: pin.pin, reason: "the sides came out differently" });
+    }
+  }
 
   return violations;
 }
@@ -2258,7 +2542,9 @@ function weighAgainstHistory(pairCountsTonight, historyWeights) {
  * Scores a schedule and also returns the raw numbers behind the score,
  * so we can show the user what the repeats actually are.
  */
-function scoreSchedule(schedule, playerCount, conflictKeys, historyContext, skillContext) {
+function scoreSchedule(schedule, playerCount, conflictKeys, historyContext, skillContext,
+                       resolvedPins) {
+  const pins = resolvedPins || [];
   const partnerCounts = new Map();
   const opponentCounts = new Map();
 
@@ -2327,6 +2613,7 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext, skil
   const repeatedOpponents = countRepeats(opponentCounts);
   const repeatedSingles = countRepeats(singlesCounts);
   const conflictViolations = findConflictViolations(schedule, conflictKeys).length;
+  const pinViolations = findPinViolations(schedule, pins).length;
 
   /*
    * Court time is what we report; benching is what we charge for.
@@ -2381,6 +2668,7 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext, skil
 
   const score =
       conflictViolations * PENALTY_CONFLICT
+    + pinViolations      * PENALTY_CONFLICT
     + sitOutRuleBreaches * PENALTY_SITOUT_RULE
     + repeatedPartners   * PENALTY_REPEAT_PARTNER
     + repeatedOpponents  * PENALTY_REPEAT_OPPONENT
@@ -2395,6 +2683,7 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext, skil
   return {
     score: score,
     conflictViolations: conflictViolations,
+    pinViolations: pinViolations,
     sitOutRuleBreaches: sitOutRuleBreaches,
     repeatedPartners: repeatedPartners,
     repeatedOpponents: repeatedOpponents,
@@ -2420,12 +2709,14 @@ function scoreSchedule(schedule, playerCount, conflictKeys, historyContext, skil
    Build ATTEMPT_COUNT random schedules, score each one, keep the best.
    ========================================================================= */
 
-function findBestSchedule(players, sessionPlan, conflictKeys, historyContext, skillContext) {
+function findBestSchedule(players, sessionPlan, conflictKeys, historyContext, skillContext,
+                          resolvedPins) {
   const startTime = performance.now();
 
   // Callers without any history or skill order still get valid, empty ones.
   const history = historyContext || buildEmptyHistoryContext(players.length);
   const skill = skillContext || buildEmptySkillContext(players.length);
+  const pins = resolvedPins || [];
 
   let bestSchedule = null;
   let bestReport = null;
@@ -2438,7 +2729,7 @@ function findBestSchedule(players, sessionPlan, conflictKeys, historyContext, sk
    */
   for (let attempt = 0; attempt < ATTEMPT_COUNT; attempt++) {
     const candidate = buildRandomSchedule(players, sessionPlan);
-    const report = scoreSchedule(candidate, players.length, conflictKeys, history, skill);
+    const report = scoreSchedule(candidate, players.length, conflictKeys, history, skill, pins);
 
     if (bestReport === null || report.score < bestReport.score) {
       bestSchedule = candidate;
@@ -2509,6 +2800,196 @@ function checkSitOutOverflow(playerCount, sessionPlan) {
     mostAnyoneSits: mostAnyoneSits,
     howManySitThatOften: howManySitThatOften
   };
+}
+
+/**
+ * Everything that makes a set of court requests impossible or contradictory.
+ *
+ * These are REFUSALS, not warnings. A request is a promise the coordinator has
+ * already made to somebody, so the honest answer to one that cannot be kept is
+ * to name it and hand the decision back — not to print a sheet and hope the
+ * problem gets noticed on court.
+ *
+ * That applies most sharply where a request collides with a keep-apart pair.
+ * Both were entered deliberately by a person, and nothing here can know which
+ * of the two they would rather give up, so it refuses to guess.
+ *
+ * Returns a list of plain-English problems. Empty means go ahead.
+ */
+function checkPinProblems(resolvedPins, sessionPlan, playersPerCourt) {
+  const problems = [];
+  const plannedRounds = new Map();
+  for (const plan of sessionPlan.rounds) plannedRounds.set(plan.roundNumber, plan);
+
+  const alreadyPinned = new Set(); // "index|round", to catch one person twice
+
+  for (const pin of resolvedPins) {
+    const label = "The court request for round " + pin.roundNumber;
+
+    if (!plannedRounds.has(pin.roundNumber)) {
+      problems.push(label + " cannot be met: this session has no round " +
+        pin.roundNumber + " left to build. " + describeCourtPin(pin.pin));
+      continue;
+    }
+
+    if (pin.missingIds.length > 0) {
+      problems.push(label + " names " + joinNames(pin.missingIds.map(nameOfPlayerId)) +
+        ", who " + (pin.missingIds.length === 1 ? "is" : "are") +
+        " not ticked as being here tonight. Tick them, or remove the request.");
+      continue;
+    }
+
+    const awayNames = pin.players
+      .filter(function (player) {
+        return !isPlayerAvailable(player.id, pin.roundNumber);
+      })
+      .map(function (player) { return player.name; });
+    if (awayNames.length > 0) {
+      problems.push(label + " names " + joinNames(awayNames) + ", who " +
+        (awayNames.length === 1 ? "is" : "are") + " down as away for that round.");
+    }
+
+    if (pin.players.length !== playersPerCourt && pin.players.length !== 2) {
+      problems.push(label + " has " + pin.players.length +
+        " people in it, which is not a court's worth. A court holds " +
+        playersPerCourt + " for doubles, or 2 for singles.");
+    }
+
+    for (let i = 0; i < pin.players.length; i++) {
+      for (let j = i + 1; j < pin.players.length; j++) {
+        if (areKeptApart(pin.players[i].id, pin.players[j].id)) {
+          problems.push(label + " would put " + pin.players[i].name + " and " +
+            pin.players[j].name + " on the same court, but they are on the " +
+            "keep-apart list. Drop the request or drop the keep-apart pair — " +
+            "that is not a call this can make for you.");
+        }
+      }
+    }
+
+    for (const player of pin.players) {
+      const key = player.index + "|" + pin.roundNumber;
+      if (alreadyPinned.has(key)) {
+        problems.push(player.name + " is named in two separate court requests " +
+          "for round " + pin.roundNumber + ", and can only be on one court.");
+      }
+      alreadyPinned.add(key);
+    }
+  }
+
+  for (const plan of sessionPlan.rounds) {
+    problems.push.apply(problems, checkPinsFitTheRound(plan));
+  }
+
+  return problems;
+}
+
+/**
+ * Whether one round's requests can physically be laid out on its courts.
+ *
+ * The courts a round runs are worked out from who is actually there, so this
+ * has to be checked per round rather than once: two requested doubles courts
+ * fit comfortably on a normal night and have nowhere to go in a round where
+ * half the group has gone home and only one court is running.
+ */
+function checkPinsFitTheRound(plan) {
+  const pins = plan.pins === undefined ? [] : plan.pins;
+  if (pins.length === 0) return [];
+
+  const courtSizes = plan.shape.courtSizes;
+  const where = " in round " + plan.roundNumber;
+
+  if (pins.length > courtSizes.length) {
+    return ["There are " + pins.length + " court requests" + where + ", but only " +
+            courtSizes.length + (courtSizes.length === 1 ? " court" : " courts") +
+            " running that round."];
+  }
+
+  const problems = [];
+  const taken = courtSizes.map(function () { return false; });
+
+  for (const pin of pins) {
+    if (pin.courtNumber === null) continue;
+    const position = pin.courtNumber - 1;
+
+    if (position >= courtSizes.length) {
+      problems.push("A court request asks for court " + pin.courtNumber + where +
+        ", but only " + courtSizes.length +
+        (courtSizes.length === 1 ? " court runs" : " courts run") + " that round.");
+    } else if (taken[position]) {
+      problems.push("Two court requests both ask for court " + pin.courtNumber + where + ".");
+    } else if (courtSizes[position] !== pin.players.length) {
+      problems.push("Court " + pin.courtNumber + where + " seats " +
+        courtSizes[position] + ", but the request for it has " +
+        pin.players.length + " people. Ask for a different court, or leave the " +
+        "court number blank.");
+    } else {
+      taken[position] = true;
+    }
+  }
+
+  for (const pin of pins) {
+    if (pin.courtNumber !== null) continue;
+
+    const position = courtSizes.findIndex(function (size, at) {
+      return !taken[at] && size === pin.players.length;
+    });
+    if (position === -1) {
+      problems.push("A court request for " + pin.players.length + " people" + where +
+        " has no free court that size to go on. That round runs courts of " +
+        joinNames(courtSizes.map(String)) + ".");
+    } else {
+      taken[position] = true;
+    }
+  }
+
+  return problems;
+}
+
+/**
+ * Whether the requests have made "at most one sit-out each" impossible.
+ *
+ * Somebody pinned onto a court in every round they are here for can never be
+ * benched, so the bench places all land on the people who are left. Once there
+ * are more places than there are people to take them, somebody has to sit
+ * twice while a pinned player sits none, and the rule is broken before the
+ * search even starts. Worth saying up front, because the fix is to move a
+ * request rather than to press Generate again and hope.
+ *
+ * Returns a sentence, or null when the rule can still hold.
+ */
+function checkPinSitOutRisk(players, sessionPlan) {
+  const alwaysOnCourt = players.filter(function (player) {
+    let pinnedSomewhere = false;
+
+    for (const plan of sessionPlan.rounds) {
+      if (!isPlayerAvailable(player.id, plan.roundNumber)) continue;
+
+      const pinnedHere = (plan.pins || []).some(function (pin) {
+        return pin.players.some(function (one) { return one.index === player.index; });
+      });
+      if (!pinnedHere) return false; // a round they could still be benched in
+      pinnedSomewhere = true;
+    }
+
+    return pinnedSomewhere;
+  });
+
+  if (alwaysOnCourt.length === 0) return null;
+
+  let benchPlaces = 0;
+  for (const plan of sessionPlan.rounds) benchPlaces += plan.shape.sitOutCount;
+  for (const round of sessionPlan.lockedRounds) benchPlaces += round.sitOuts.length;
+
+  const benchable = players.length - alwaysOnCourt.length;
+  if (benchPlaces <= benchable) return null;
+
+  return joinNames(alwaysOnCourt.map(function (player) { return player.name; })) +
+    (alwaysOnCourt.length === 1 ? " is" : " are") +
+    " in a court request for every round they are here, so " +
+    (alwaysOnCourt.length === 1 ? "she or he" : "they") +
+    " can never be benched. That leaves " + benchPlaces + " sit-outs to share " +
+    "between " + benchable + " people, so somebody will have to sit out twice. " +
+    "Move a request to a different round if that is not what you want.";
 }
 
 /**
@@ -2776,6 +3257,88 @@ function renderSitOutOverflowNotice(overflow, playerCount, roundCount, courtCoun
     "Sit-outs are still shared as evenly as possible: nobody sits " +
     describeTimes(overflow.mostAnyoneSits) + " until everyone has sat " +
     describeTimes(overflow.mostAnyoneSits - 1) + "."));
+
+  messagesElement.appendChild(box);
+}
+
+/**
+ * Says what honouring the court requests actually cost, in the same words the
+ * result panel uses for everything else.
+ *
+ * Two searches are run over identical input, one free and one bound by the
+ * requests, and the winners are compared component by component. Printing the
+ * two scores instead would be no use to anybody: "412 against 388" does not
+ * tell a coordinator whether it is worth ringing somebody back and taking the
+ * request away again. "Two extra repeated partnerships" does.
+ */
+function describePinCost(pinCount, withRequests, withoutRequests) {
+  const requests = pinCount === 1 ? "1 court request" : pinCount + " court requests";
+  const costs = [];
+
+  function compare(field, singular, plural) {
+    const extra = withRequests[field] - withoutRequests[field];
+    if (extra > 0) costs.push(extra + " extra " + (extra === 1 ? singular : plural));
+  }
+
+  compare("repeatedPartners", "repeated partnership", "repeated partnerships");
+  compare("repeatedOpponents", "repeated opponent pairing", "repeated opponent pairings");
+  compare("repeatedSingles", "repeated singles matchup", "repeated singles matchups");
+  compare("sitOutImbalance", "point of sit-out imbalance", "points of sit-out imbalance");
+  compare("sameCourtInARow",
+    "round where somebody stays on the same court",
+    "rounds where somebody stays on the same court");
+
+  if (costs.length > 0) {
+    return "Honouring " + requests + " costs " + joinNames(costs) + ".";
+  }
+
+  /*
+   * Nothing countable got worse, but the score still can, through the history
+   * terms — those are weighted fractions, and a number nobody can act on is
+   * worse than a sentence saying it was small.
+   */
+  if (withRequests.score > withoutRequests.score) {
+    return "Honouring " + requests + " costs nothing tonight — only a little " +
+           "more overlap with previous weeks.";
+  }
+
+  return pinCount === 1
+    ? "This court request fits with no cost."
+    : "These court requests fit with no cost.";
+}
+
+/** The cost sentence, with the requests it is talking about listed under it. */
+function renderPinCostNotice(resolvedPins, costText) {
+  const box = createElement("div", "notice");
+  box.appendChild(createElement("p", null, costText));
+
+  const list = createElement("ul");
+  for (const pin of resolvedPins) {
+    list.appendChild(createElement("li", null, describeCourtPin(pin.pin)));
+  }
+  box.appendChild(list);
+
+  messagesElement.appendChild(box);
+}
+
+/** A request the search could not meet. Never shown quietly, never shown late. */
+function renderPinWarning(violations) {
+  const box = createElement("div", "notice error");
+  box.appendChild(createElement("p", null,
+    violations.length === 1
+      ? "A court request could not be met:"
+      : violations.length + " court requests could not be met:"));
+
+  const list = createElement("ul");
+  for (const violation of violations) {
+    list.appendChild(createElement("li", null,
+      describeCourtPin(violation.pin) + " Not met \u2014 " + violation.reason + "."));
+  }
+  box.appendChild(list);
+
+  box.appendChild(createElement("p", null,
+    "The schedule below is the best that could be found, and it does NOT do " +
+    "what was asked. Tell whoever asked, or take the request off and generate again."));
 
   messagesElement.appendChild(box);
 }
@@ -3072,6 +3635,10 @@ function updateAttendanceCount() {
   if (awayAllNight > 0) line += ", " + awayAllNight + " away all night";
 
   attendanceCount.textContent = line;
+
+  // The court request form offers tonight's players by name, so it goes stale
+  // the moment somebody is ticked, unticked or walks in.
+  renderCourtRequestPanel();
 }
 
 /* ---------- Availability: who is here for which rounds ---------- */
@@ -3586,6 +4153,17 @@ function handleSaveSessionClick() {
   renderHistoryList();
   renderHistorySummary();
 
+  /*
+   * The evening is on the record now, so the requests that shaped it have been
+   * kept and are finished with. Their pairings went into history as ordinary
+   * pairings, which is right — a game the coordinator arranged still counts as
+   * a game those four played — but the requests themselves must not survive
+   * into next week, when nobody has asked for anything.
+   */
+  const requestCount = courtPins.length;
+  clearCourtPins();
+  renderCourtRequestPanel();
+
   // Saving twice would double-count the evening, so the button is spent.
   const button = document.getElementById("saveSessionButton");
   button.disabled = true;
@@ -3597,7 +4175,10 @@ function handleSaveSessionClick() {
     (guestCount > 0
       ? " " + guestCount + " guest(s) left out — they aren't on the roster."
       : "") +
-    " Future schedules for this section will take it into account.", "success");
+    " Future schedules for this section will take it into account." +
+    (requestCount > 0
+      ? " The " + requestCount + " court request(s) have been cleared."
+      : ""), "success");
 }
 
 /**
@@ -3685,12 +4266,55 @@ function buildAndShowSchedule(players, lockedRounds) {
   }
   keepApartProblems.forEach(showError);
 
+  /*
+   * Court requests, which the coordinator has already promised out loud.
+   * Requests for rounds that are already played are dropped here rather than
+   * enforced: those rounds are not being rebuilt, so the only thing enforcing
+   * them could do is refuse to build the rounds that ARE.
+   */
+  const pins = resolveCourtPins(players).filter(function (pin) {
+    return pin.roundNumber > lockedRounds.length;
+  });
+  attachPinsToSessionPlan(sessionPlan, pins);
+
+  const pinProblems = checkPinProblems(pins, sessionPlan, playersPerCourt);
+  if (pinProblems.length > 0) {
+    pinProblems.forEach(showError);
+    showError("Nothing has been generated. Sort the court requests out above " +
+              "and press Generate again.");
+    return;
+  }
+
+  const pinSitOutRisk = checkPinSitOutRisk(players, sessionPlan);
+  if (pinSitOutRisk !== null) showError(pinSitOutRisk);
+
   // --- Search, then show what we found ---
   const conflictKeys = buildConflictKeys(players);
   const historyContext = buildHistoryContext(players, sectionPicker.value);
   const skillContext = buildSkillContext(players, sectionPicker.value);
   const result = findBestSchedule(
-    players, sessionPlan, conflictKeys, historyContext, skillContext);
+    players, sessionPlan, conflictKeys, historyContext, skillContext, pins);
+
+  /*
+   * What the requests cost. The same search is run again with them taken away,
+   * so the two winners can be compared on like-for-like input and the
+   * difference described in things the coordinator recognises.
+   */
+  if (pins.length > 0) {
+    attachPinsToSessionPlan(sessionPlan, []);
+    const withoutRequests = findBestSchedule(
+      players, sessionPlan, conflictKeys, historyContext, skillContext, []);
+
+    renderPinCostNotice(pins,
+      describePinCost(pins.length, result.report, withoutRequests.report));
+  }
+
+  // The huge penalty steers the search, but if no candidate managed it the
+  // best of a bad lot still won. Check the schedule we are about to show.
+  const pinViolations = findPinViolations(result.schedule, pins);
+  if (pinViolations.length > 0) {
+    renderPinWarning(pinViolations);
+  }
 
   // The huge penalty steers the search away from violations, but when they
   // are unavoidable the winner will still contain one. Always check.
@@ -3909,6 +4533,210 @@ document.getElementById("nextRoundButton").addEventListener("click", function ()
 // "input" rather than "change": every availability control lists the rounds
 // by name, so they are stale the moment the number is edited.
 document.getElementById("numRounds").addEventListener("input", applyRoundCountChange);
+
+
+/* ---------- Court requests ---------- */
+
+const pinRoundPicker = document.getElementById("pinRoundPicker");
+const pinPlayerList = document.getElementById("pinPlayerList");
+const pinCourtNumber = document.getElementById("pinCourtNumber");
+const pinFormMessage = document.getElementById("pinFormMessage");
+const pinList = document.getElementById("pinList");
+
+/** "group" (just on together) or "teams" (the sides were named too). */
+function readPinKind() {
+  const chosen = document.querySelector("input[name='pinKind']:checked");
+  return chosen === null ? "group" : chosen.value;
+}
+
+/** Fills the round dropdown for the request form, keeping the choice made. */
+function renderPinRoundPicker() {
+  const roundCount = getRoundCount();
+  const wanted = parseInt(pinRoundPicker.value, 10) || currentRound;
+
+  emptyElement(pinRoundPicker);
+  for (let round = 1; round <= roundCount; round++) {
+    const option = createElement("option", null, "Round " + round);
+    option.value = String(round);
+    pinRoundPicker.appendChild(option);
+  }
+  pinRoundPicker.value = String(Math.min(wanted, roundCount));
+}
+
+/**
+ * The tick list for a new request, over whoever is here tonight.
+ *
+ * Redrawn whenever attendance changes, so the ticks and the side each person
+ * was put on are read back off the old rows first — the coordinator may be
+ * halfway through building a request when somebody else walks in.
+ *
+ * The Team 1 / Team 2 dropdowns only appear when the sides were actually
+ * asked for. Showing them all the time would invite people to fill them in,
+ * and a request that names sides nobody asked for is a worse request.
+ */
+function renderPinPlayerList() {
+  const wasTicked = new Set();
+  const sideChosen = new Map();
+  pinPlayerList.querySelectorAll("input[type='checkbox']").forEach(function (box) {
+    if (box.checked) wasTicked.add(box.value);
+  });
+  pinPlayerList.querySelectorAll("select").forEach(function (select) {
+    sideChosen.set(select.dataset.playerId, select.value);
+  });
+
+  emptyElement(pinPlayerList);
+
+  const players = getSelectedPlayers();
+  if (players.length === 0) {
+    pinPlayerList.appendChild(createElement("div", "empty-note",
+      "Tick some players as being here first."));
+    return;
+  }
+
+  const namingTeams = readPinKind() === "teams";
+
+  for (const player of players) {
+    const row = createElement("div", "roster-row");
+
+    const tick = createElement("label", "check-row");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = player.id;
+    box.checked = wasTicked.has(player.id);
+    tick.appendChild(box);
+    tick.appendChild(createElement("span", null, player.name));
+    row.appendChild(tick);
+
+    if (namingTeams) {
+      const actions = createElement("div", "row-actions");
+      const side = document.createElement("select");
+      side.dataset.playerId = player.id;
+      side.setAttribute("aria-label", "Which side " + player.name + " is on");
+
+      ["1", "2"].forEach(function (number) {
+        const option = createElement("option", null, "Team " + number);
+        option.value = number;
+        side.appendChild(option);
+      });
+      side.value = sideChosen.get(player.id) || "1";
+
+      actions.appendChild(side);
+      row.appendChild(actions);
+    }
+
+    pinPlayerList.appendChild(row);
+  }
+}
+
+/** The requests currently standing, each with a way to take it back off. */
+function renderPinList() {
+  emptyElement(pinList);
+
+  if (courtPins.length === 0) {
+    pinList.appendChild(createElement("div", "empty-note",
+      "No court requests. Everyone is placed by the generator."));
+    return;
+  }
+
+  for (const pin of courtPins) {
+    const row = createElement("div", "roster-row");
+    row.appendChild(createElement("span", null, describeCourtPin(pin)));
+
+    const actions = createElement("div", "row-actions");
+    const remove = createElement("button", "secondary", "Remove");
+    remove.type = "button";
+    remove.addEventListener("click", function () {
+      courtPins = courtPins.filter(function (one) { return one.id !== pin.id; });
+      emptyElement(pinFormMessage); // "Added." would still be sitting there
+      renderCourtRequestPanel();
+    });
+    actions.appendChild(remove);
+    row.appendChild(actions);
+
+    pinList.appendChild(row);
+  }
+}
+
+function renderCourtRequestPanel() {
+  renderPinRoundPicker();
+  renderPinPlayerList();
+  renderPinList();
+}
+
+function handleAddPinClick() {
+  emptyElement(pinFormMessage);
+
+  const roundNumber = parseInt(pinRoundPicker.value, 10);
+  const playersPerCourt = readNumberInput("playersPerCourt", 4);
+
+  const chosenIds = [];
+  pinPlayerList.querySelectorAll("input[type='checkbox']:checked")
+    .forEach(function (box) { chosenIds.push(box.value); });
+
+  if (chosenIds.length !== playersPerCourt && chosenIds.length !== 2) {
+    showNotice(pinFormMessage, "Tick " + playersPerCourt +
+      " people for a doubles court, or 2 for a singles court. You have ticked " +
+      chosenIds.length + ".", "error");
+    return;
+  }
+
+  let teams = null;
+  if (readPinKind() === "teams") {
+    const sideOf = new Map();
+    pinPlayerList.querySelectorAll("select").forEach(function (select) {
+      sideOf.set(select.dataset.playerId, select.value);
+    });
+
+    const sideOne = chosenIds.filter(function (id) { return sideOf.get(id) !== "2"; });
+    const sideTwo = chosenIds.filter(function (id) { return sideOf.get(id) === "2"; });
+
+    if (sideOne.length !== sideTwo.length) {
+      showNotice(pinFormMessage, "The two teams have to be the same size. " +
+        "You have " + sideOne.length + " on team 1 and " + sideTwo.length +
+        " on team 2.", "error");
+      return;
+    }
+    teams = [sideOne, sideTwo];
+  }
+
+  let courtNumber = null;
+  const courtText = pinCourtNumber.value.trim();
+  if (courtText !== "") {
+    const courtCount = readNumberInput("numCourts", 4);
+    courtNumber = parseInt(courtText, 10);
+    if (!Number.isFinite(courtNumber) || courtNumber < 1 || courtNumber > courtCount) {
+      showNotice(pinFormMessage, "Court number has to be between 1 and " +
+        courtCount + ", or blank for any court.", "error");
+      return;
+    }
+  }
+
+  courtPins.push({
+    id: nextPinNumber,
+    roundNumber: roundNumber,
+    playerIds: chosenIds,
+    teams: teams,
+    courtNumber: courtNumber
+  });
+  nextPinNumber += 1;
+
+  // Clear the form: the next request is a different one, and leaving the last
+  // one ticked is how you end up adding it twice.
+  pinPlayerList.querySelectorAll("input[type='checkbox']").forEach(function (box) {
+    box.checked = false;
+  });
+  pinCourtNumber.value = "";
+
+  renderCourtRequestPanel();
+  showNotice(pinFormMessage, "Added. " +
+    describeCourtPin(courtPins[courtPins.length - 1]), "success");
+}
+
+document.getElementById("addPinButton").addEventListener("click", handleAddPinClick);
+
+document.querySelectorAll("input[name='pinKind']").forEach(function (radio) {
+  radio.addEventListener("change", renderPinPlayerList);
+});
 
 
 /* =========================================================================
@@ -4323,6 +5151,11 @@ sectionPicker.addEventListener("change", function () {
   // players are cleared. Guests stay: a walk-in belongs to the night, not
   // to a section.
   borrowedPlayerIds = new Set();
+
+  // A request names people from the section you have just left, so it cannot
+  // mean anything here. Clearing beats carrying a half-valid promise across.
+  clearCourtPins();
+
   renderAttendanceList();
   renderOtherSectionList();
   clearScreen(); // an old schedule for a different section would be confusing
