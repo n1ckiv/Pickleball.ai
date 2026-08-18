@@ -2851,8 +2851,10 @@ function checkPinProblems(resolvedPins, sessionPlan, playersPerCourt) {
 
     if (pin.players.length !== playersPerCourt && pin.players.length !== 2) {
       problems.push(label + " has " + pin.players.length +
-        " people in it, which is not a court's worth. A court holds " +
-        playersPerCourt + " for doubles, or 2 for singles.");
+        " people in it, which is not a court's worth. " +
+        (playersPerCourt === 2
+          ? "A court holds 2 tonight."
+          : "A court holds " + playersPerCourt + " for doubles, or 2 for singles."));
     }
 
     for (let i = 0; i < pin.players.length; i++) {
@@ -2876,8 +2878,17 @@ function checkPinProblems(resolvedPins, sessionPlan, playersPerCourt) {
     }
   }
 
-  for (const plan of sessionPlan.rounds) {
-    problems.push.apply(problems, checkPinsFitTheRound(plan));
+  /*
+   * Whether the requests fit on the courts is only asked once each request is
+   * known to be sound. A request with somebody missing from it has already
+   * been shrunk by one, and a request of the wrong size is the wrong size —
+   * asking either of those where it would go produces a second complaint about
+   * the same mistake, and two complaints read as two mistakes.
+   */
+  if (problems.length === 0) {
+    for (const plan of sessionPlan.rounds) {
+      problems.push.apply(problems, checkPinsFitTheRound(plan));
+    }
   }
 
   return problems;
@@ -3273,6 +3284,24 @@ function renderSitOutOverflowNotice(overflow, playerCount, roundCount, courtCoun
  */
 function describePinCost(pinCount, withRequests, withoutRequests) {
   const requests = pinCount === 1 ? "1 court request" : pinCount + " court requests";
+
+  /*
+   * Both figures come from a random search, so the free one can simply have
+   * had a worse night — and then the components disagree in ways that owe
+   * nothing to the requests, inventing a cost for a request that fits fine.
+   *
+   * The schedule we are about to show is itself a perfectly legal schedule for
+   * the unconstrained problem. So if the free search could not beat it, the
+   * requests cost nothing, and any component that came out differently is
+   * noise rather than a price. Only when the free search genuinely found
+   * something better is there anything to charge for.
+   */
+  if (withRequests.score <= withoutRequests.score) {
+    return pinCount === 1
+      ? "This court request fits with no cost."
+      : "These court requests fit with no cost.";
+  }
+
   const costs = [];
 
   function compare(field, singular, plural) {
@@ -3293,18 +3322,12 @@ function describePinCost(pinCount, withRequests, withoutRequests) {
   }
 
   /*
-   * Nothing countable got worse, but the score still can, through the history
-   * terms — those are weighted fractions, and a number nobody can act on is
+   * The score is worse but nothing countable is, so the difference is in the
+   * history terms — weighted fractions, and a number nobody can act on is
    * worse than a sentence saying it was small.
    */
-  if (withRequests.score > withoutRequests.score) {
-    return "Honouring " + requests + " costs nothing tonight — only a little " +
-           "more overlap with previous weeks.";
-  }
-
-  return pinCount === 1
-    ? "This court request fits with no cost."
-    : "These court requests fit with no cost.";
+  return "Honouring " + requests + " costs nothing tonight — only a little " +
+         "more overlap with previous weeks.";
 }
 
 /** The cost sentence, with the requests it is talking about listed under it. */
@@ -3317,6 +3340,14 @@ function renderPinCostNotice(resolvedPins, costText) {
     list.appendChild(createElement("li", null, describeCourtPin(pin.pin)));
   }
   box.appendChild(list);
+
+  // Where the number came from. Both evenings are found by random search, so
+  // this is the price against the best schedule we managed WITHOUT the
+  // requests, not against a perfect one — which is worth saying rather than
+  // letting a figure that moves a little between runs look exact.
+  box.appendChild(createElement("p", null,
+    "Measured by building the evening twice, once with the requests and once " +
+    "without, and comparing the two."));
 
   messagesElement.appendChild(box);
 }
@@ -4677,6 +4708,24 @@ function handleAddPinClick() {
     showNotice(pinFormMessage, "Tick " + playersPerCourt +
       " people for a doubles court, or 2 for a singles court. You have ticked " +
       chosenIds.length + ".", "error");
+    return;
+  }
+
+  // Caught here as well as at generation time, because every other mistake in
+  // this form is caught here, and finding out at Generate that two requests
+  // you made ten minutes apart contradict each other is a nasty surprise.
+  const alreadyAsked = [];
+  for (const existing of courtPins) {
+    if (existing.roundNumber !== roundNumber) continue;
+    for (const id of chosenIds) {
+      if (existing.playerIds.includes(id)) alreadyAsked.push(nameOfPlayerId(id));
+    }
+  }
+  if (alreadyAsked.length > 0) {
+    showNotice(pinFormMessage, joinNames(alreadyAsked) +
+      (alreadyAsked.length === 1 ? " is" : " are") +
+      " already in a court request for round " + roundNumber +
+      ", and can only be on one court.", "error");
     return;
   }
 
