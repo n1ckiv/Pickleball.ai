@@ -3935,6 +3935,17 @@ function buildRoundWindows(startMinutes, roundMinutes, roundCount) {
   return windows;
 }
 
+/*
+ * The longest run of play we will read as one session.
+ *
+ * An end time before the start usually means an evening crossing midnight,
+ * so 10pm to 12:30am has to work. But it can equally mean the two boxes were
+ * filled in the wrong way round, and the two cases look identical. Anything
+ * longer than this is taken as the mistake, because nobody plays pickleball
+ * for nine hours and everybody eventually types the times backwards.
+ */
+const LONGEST_SESSION_MINUTES = 8 * 60;
+
 /**
  * How many whole rounds fit between two times, and what is left over.
  *
@@ -3942,20 +3953,36 @@ function buildRoundWindows(startMinutes, roundMinutes, roundCount) {
  * as twelve spare minutes, never squeezed out as a twelve-minute round with
  * an eighteen-minute label — the people in that round would get two thirds of
  * the court time everyone else got, and nothing on screen would say so.
+ *
+ * Returns a `problem` instead of a count when the times cannot be read as a
+ * session at all, so the caller can say why rather than showing a number that
+ * is plainly wrong.
  */
 function computeRoundSchedule(startMinutes, endMinutes, roundMinutes) {
   if (startMinutes === null || endMinutes === null) return null;
-  if (!Number.isFinite(roundMinutes) || roundMinutes <= 0) return null;
+  if (!Number.isFinite(roundMinutes) || roundMinutes <= 0) {
+    return { problem: "Minutes per round needs to be at least 1." };
+  }
 
-  // An end time at or before the start is read as running past midnight,
-  // which is a friendlier answer than refusing a session that ends at 00:30.
+  if (startMinutes === endMinutes) {
+    return { problem: "The start and end times are the same, so there is no " +
+                      "session to divide into rounds." };
+  }
+
   const lengthMinutes = endMinutes > startMinutes
     ? endMinutes - startMinutes
-    : endMinutes + 1440 - startMinutes;
+    : endMinutes + 1440 - startMinutes;   // an evening crossing midnight
+
+  if (lengthMinutes > LONGEST_SESSION_MINUTES) {
+    return { problem: "That is " + Math.floor(lengthMinutes / 60) + " hours of " +
+                      "play, which is longer than any session — check the " +
+                      "start and end times are the right way round." };
+  }
 
   const roundCount = Math.floor(lengthMinutes / roundMinutes);
 
   return {
+    problem: null,
     roundCount: roundCount,
     spareMinutes: lengthMinutes - roundCount * roundMinutes,
     roundMinutes: roundMinutes,
@@ -3965,12 +3992,26 @@ function computeRoundSchedule(startMinutes, endMinutes, roundMinutes) {
   };
 }
 
+/**
+ * The minutes-per-round box, as typed.
+ *
+ * Deliberately not readNumberInput, which quietly swaps in the default for
+ * anything non-positive. A blank box while somebody is still typing should
+ * fall back; a box showing "0" should not be answered with a schedule built
+ * on 18, because then the screen contradicts itself.
+ */
+function readRoundMinutes() {
+  const text = document.getElementById("roundMinutes").value.trim();
+  if (text === "") return DEFAULT_ROUND_MINUTES;
+  return parseInt(text, 10);
+}
+
 /** The schedule the three time boxes currently describe, or null. */
 function readRoundSchedule() {
   return computeRoundSchedule(
     parseTimeOfDay(document.getElementById("startTime").value),
     parseTimeOfDay(document.getElementById("endTime").value),
-    readNumberInput("roundMinutes", DEFAULT_ROUND_MINUTES));
+    readRoundMinutes());
 }
 
 /* ---------- The clock ---------- */
@@ -4004,7 +4045,7 @@ function liveRoundWindows() {
   const roundMinutes = readNumberInput("roundMinutes", DEFAULT_ROUND_MINUTES);
 
   if (clockStartedAtMs === null) {
-    return planned === null ? null : planned.windows;
+    return planned === null || planned.problem !== null ? null : planned.windows;
   }
 
   const started = new Date(clockStartedAtMs);
@@ -4029,10 +4070,24 @@ function readClock() {
   };
 }
 
+/**
+ * Start, or pick up again after a break.
+ *
+ * Start means "the round we are on begins now", not "the evening begins now".
+ * A coordinator who stops the clock at round four to let everyone get a drink
+ * must come back to round four; sending them to round one would throw away
+ * three rounds of the night they have already played, which is the one thing
+ * the clock is never allowed to do.
+ *
+ * The anchor is therefore backdated by the rounds already behind us, so the
+ * round windows still line up and the countdown starts full.
+ */
 function startClock() {
-  clockStartedAtMs = Date.now();
+  const roundMinutes = readNumberInput("roundMinutes", DEFAULT_ROUND_MINUTES);
+  clockStartedAtMs = Date.now() - (currentRound - 1) * roundMinutes * 60 * 1000;
 
-  // Starting the clock afresh is the coordinator handing it the reins back.
+  // Setting it going again is the coordinator handing the clock the reins
+  // back — from wherever the evening has actually got to.
   coordinatorSetRoundByHand = false;
 
   if (clockHandle !== null) clearInterval(clockHandle);
@@ -4096,6 +4151,15 @@ function renderRoundSchedule() {
     return;
   }
 
+  // Anything the times cannot answer leaves the manual box in charge, so the
+  // evening can still be set up while the times are being sorted out.
+  if (schedule.problem !== null) {
+    roundsBox.disabled = false;
+    hint.textContent = "";
+    showNotice(container, schedule.problem, "error");
+    return;
+  }
+
   if (schedule.roundCount === 0) {
     roundsBox.disabled = false;
     hint.textContent = "";
@@ -4111,7 +4175,8 @@ function renderRoundSchedule() {
   hint.textContent = "Worked out from the times above.";
 
   let summary = schedule.roundCount + (schedule.roundCount === 1 ? " round" : " rounds") +
-                " of " + schedule.roundMinutes + " minutes";
+                " of " + schedule.roundMinutes +
+                (schedule.roundMinutes === 1 ? " minute" : " minutes");
   if (schedule.spareMinutes > 0) {
     summary += ", " + schedule.spareMinutes + " minute" +
                (schedule.spareMinutes === 1 ? "" : "s") + " spare";
@@ -4188,11 +4253,16 @@ function renderTimer() {
  */
 function handleSessionTimesChange() {
   const schedule = readRoundSchedule();
-  if (schedule !== null && schedule.roundCount > 0) {
+  if (schedule !== null && schedule.problem === null && schedule.roundCount > 0) {
     document.getElementById("numRounds").value = String(schedule.roundCount);
   }
   applyRoundCountChange();
   renderRoundSchedule();
+
+  // A tick rather than just a redraw: a shorter round may mean the clock has
+  // already passed into a later one, and the panel would otherwise spend a
+  // second describing a round nobody is on.
+  if (clockStartedAtMs !== null) onClockTick();
   renderTimer();
 }
 
