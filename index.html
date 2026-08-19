@@ -19,14 +19,33 @@
 
   * { box-sizing: border-box; }
 
+  /*
+   * The window is split into two: the page, which scrolls, and a short bar at
+   * the foot holding the bug button. The obvious alternative — floating the
+   * button over the page — was tried and dropped: on a phone the tick boxes sit
+   * at the far left, exactly where the button lands, so it covered controls
+   * every time you scrolled. Giving it its own strip costs about 60px of height
+   * and covers nothing, ever.
+   */
+  html, body { height: 100%; }
+
   body {
     margin: 0;
-    padding: 16px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
     background: var(--paper);
     color: var(--ink);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     font-size: 18px;
     line-height: 1.45;
+  }
+
+  .page {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 16px;
   }
 
   h1 { font-size: 26px; margin: 0 0 4px; }
@@ -441,7 +460,9 @@
 
   /* ---------- Wider screens (iPad landscape ~1024px) ---------- */
   @media (min-width: 700px) {
-    body { padding: 24px 32px; max-width: 1100px; margin: 0 auto; }
+    /* The page is what widens and centres, not the body — the body is now just
+       the page plus the bar at the foot, and the bar should span the window. */
+    .page { padding: 24px 32px; max-width: 1100px; margin: 0 auto; }
     .number-fields { grid-template-columns: repeat(3, 1fr); }
     .tab-bar { justify-content: flex-start; }
     .tab-button { flex: 0 0 auto; min-width: 220px; }
@@ -454,11 +475,95 @@
   @media (min-width: 1000px) {
     .court-grid { grid-template-columns: repeat(3, 1fr); }
   }
+
+  /* ---------- Bug report ---------- */
+  /* The strip at the foot of the window. Its only job is to hold the button
+     somewhere the page can never scroll underneath. */
+  .bug-bar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    padding: 6px 12px;
+    border-top: 3px solid var(--ink);
+    background: var(--paper);
+  }
+
+  .bug-button {
+    flex: 0 0 auto;
+    width: 48px;
+    height: 48px;
+    min-height: 48px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 24px;
+    line-height: 1;
+    background: var(--paper);
+    color: var(--ink);
+    border: 3px solid var(--ink);
+  }
+
+  .bug-button:active { background: var(--muted); }
+
+  .bug-panel {
+    position: fixed;
+    left: 12px;
+    bottom: 72px;
+    z-index: 21;
+    /* Never wider than the screen, never wider than is comfortable to read. */
+    width: calc(100vw - 24px);
+    max-width: 380px;
+    /* Tall phones and short laptops both: scroll inside the panel rather than
+       letting it run off the top of the screen. */
+    max-height: calc(100vh - 90px);
+    overflow-y: auto;
+    background: var(--paper);
+    border: 3px solid var(--ink);
+    border-radius: 8px;
+    padding: 14px;
+  }
+
+  .bug-panel[hidden] { display: none; }
+
+  .bug-panel h2 { font-size: 19px; }
+
+  .bug-panel textarea {
+    width: 100%;
+    min-height: 110px;
+    font-family: inherit;
+    font-size: 17px;
+    color: var(--ink);
+    background: var(--paper);
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    padding: 10px;
+  }
+
+  /* What is about to be shared, shown in full before anything leaves. */
+  .bug-context {
+    border: 2px solid var(--line);
+    border-radius: 6px;
+    background: var(--muted);
+    padding: 10px;
+    margin: 0 0 14px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 190px;
+    overflow-y: auto;
+  }
 </style>
 </head>
 <body>
 
+<!-- Everything that scrolls lives in here. See the .page rule for why. -->
+<div class="page">
+
 <h1>Pickleball Rotation Scheduler</h1>
+
+<!-- Sits above the tabs so a migration notice is seen whichever screen you land on. -->
+<div id="migrationNotice"></div>
 
 <div class="tab-bar" role="tablist">
   <button class="tab-button" id="tabSession" type="button" role="tab" aria-selected="true">Session</button>
@@ -491,7 +596,7 @@
   <details class="drawer">
     <summary>Add someone from another section</summary>
     <div class="drawer-body">
-      <p class="hint">Tonight only — this does not change anyone's saved sections.</p>
+      <p class="hint">Tonight only — this does not change anyone's saved skill level.</p>
 
       <div class="field">
         <label for="otherSectionSearch">Search</label>
@@ -667,7 +772,8 @@
     </div>
 
     <div class="field">
-      <label>Sections <span class="hint">— tick every night they play.</span></label>
+      <label>Skill level <span class="hint">— one each. Playing on another
+        night is handled by &ldquo;Add someone from another section&rdquo;.</span></label>
       <div class="check-list" id="playerSectionChoices"></div>
     </div>
 
@@ -768,6 +874,43 @@
   <div id="historyList"></div>
 </div>
 
+</div><!-- /.page -->
+
+
+<!-- ===================== BUG REPORT ===================== -->
+<!-- Outside the screens, so it is there on every tab. Nothing here talks to a
+     server: the report is either handed to your mail app or put on the
+     clipboard, both of which work with the network switched off. -->
+<div class="bug-bar">
+  <button class="bug-button" id="bugButton" type="button"
+          aria-label="Report a problem" aria-expanded="false"
+          aria-controls="bugPanel">&#128161;</button>
+</div>
+
+<div class="bug-panel" id="bugPanel" hidden role="dialog" aria-label="Report a problem">
+  <h2>Report a problem</h2>
+
+  <div class="field">
+    <label for="bugDescription">What happened? What did you expect?</label>
+    <textarea id="bugDescription"
+              placeholder="I pressed Generate and round 3 was empty. I expected four courts."></textarea>
+  </div>
+
+  <label>What gets sent with it</label>
+  <p class="hint">Numbers and settings only — no names, no roster, no saved
+    sessions. Read it before you send it.</p>
+  <div class="bug-context" id="bugContext"></div>
+
+  <div class="button-row">
+    <button id="bugEmailButton" type="button">Email report</button>
+    <button class="secondary" id="bugCopyButton" type="button">Copy report</button>
+  </div>
+
+  <button class="secondary" id="bugCloseButton" type="button">Close</button>
+
+  <div id="bugMessage"></div>
+</div>
+
 
 <script>
 /* =========================================================================
@@ -784,6 +927,26 @@
    Sections 2 to 6 are the generator. They know nothing about rosters or
    storage — they just receive a list of players and do the maths.
    ========================================================================= */
+
+
+/* -------------------------------------------------------------------------
+   THE LAST THING THAT WENT WRONG
+
+   Registered first, before anything else runs, so a failure while the page is
+   still setting itself up is caught too. Only the most recent one is kept —
+   the bug report wants the failure that made someone press the button, not a
+   log. Nothing is sent anywhere; it sits in memory until a report is written.
+   ------------------------------------------------------------------------- */
+let lastScriptError = null;
+
+window.onerror = function (message, source, lineNumber) {
+  lastScriptError = message + " (line " + lineNumber + ")";
+  return false; // still let the browser print it to the console
+};
+
+window.addEventListener("unhandledrejection", function (event) {
+  lastScriptError = "Unhandled promise rejection: " + String(event.reason);
+});
 
 
 /* -------------------------------------------------------------------------
@@ -913,15 +1076,22 @@ const PENALTY_SITOUT_RULE = 100000;       // per sit-out beyond a player's fair 
 const STORAGE_KEY = "pickleball-data";
 
 /*
- * Version 1 had no "history". Version 2 added it. Version 3 adds a skill
- * order — a tier number per player, per section.
+ * Version 1 had no "history". Version 2 added it. Version 3 added a skill
+ * order — a tier number per player, per section. Version 4 gives each player
+ * ONE section instead of a list, and with it one tier instead of one per
+ * section.
  *
- * Reading an older file is not a special case anywhere in the code:
- * cleanUpData simply finds no history and no tiers, and the empty defaults
- * from buildDefaultData stand. A section nobody has ordered behaves exactly
- * as it did before tiers existed.
+ * Versions 1 to 3 are all read the same way, because none of them is a special
+ * case anywhere in the code: cleanUpData finds no history and no tiers, and
+ * the empty defaults from buildDefaultData stand.
+ *
+ * Version 4 is different, and is the reason the number had to move. All three
+ * earlier versions store `sections` as an array, so a file cannot be upgraded
+ * by inspecting its shape alone — a version 3 file and a version 4 file would
+ * otherwise be indistinguishable, and the migration would either run twice or
+ * not at all. See readPlayerSection.
  */
-const DATA_VERSION = 3;
+const DATA_VERSION = 4;
 
 /** The starting point for a brand new device: five sections, nobody in them. */
 function buildDefaultData() {
@@ -948,6 +1118,8 @@ function buildDefaultData() {
  * anything unexpected is simply dropped.
  */
 function cleanUpData(rawData) {
+  lastMigrationNotes = []; // this read only; a previous file's notes are done with
+
   const safeData = buildDefaultData();
   if (!rawData || typeof rawData !== "object") return safeData;
 
@@ -977,17 +1149,15 @@ function cleanUpData(rawData) {
       if (id === "" || usedIds.has(id)) id = "p" + (usedIds.size + 1) + "-" + Date.now();
       usedIds.add(id);
 
-      // Drop section ids that no longer exist, so nobody points at nothing.
-      const sections = Array.isArray(player.sections)
-        ? player.sections.filter(function (sectionId) { return knownSectionIds.has(sectionId); })
-        : [];
+      const name = player.name.trim();
+      const placed = readPlayerSection(player, name, safeData.sections, knownSectionIds);
 
       safeData.players.push({
         id: id,
-        name: player.name.trim(),
+        name: name,
         gender: player.gender === "M" || player.gender === "F" ? player.gender : null,
-        sections: sections,
-        tiers: cleanUpTiers(player.tiers, sections)
+        section: placed.section,
+        tier: placed.tier
       });
     }
   }
@@ -1031,23 +1201,101 @@ function cleanUpData(rawData) {
 }
 
 /**
- * Keeps only the tier numbers that mean something: a whole number, 1 or more,
- * for a section this player is actually in. Tier 1 is the strongest.
+ * WHO WAS MOVED BY THE MIGRATION, and where to.
  *
- * A tier for a section they have left is dropped rather than kept. Unlike
- * history, a skill order is a live setting and not a record of what happened,
- * so a stale one would silently reappear if they ever rejoined.
+ * Filled by cleanUpData and read straight afterwards by whoever called it.
+ * Deliberately NOT part of appData: it describes one act of reading a file,
+ * not anything about the club, and putting it on the data object would save it
+ * to storage and show the same notice for ever.
  */
-function cleanUpTiers(rawTiers, sections) {
-  const tiers = {};
-  if (!rawTiers || typeof rawTiers !== "object") return tiers;
+let lastMigrationNotes = [];
 
-  for (const sectionId of sections) {
-    const tier = rawTiers[sectionId];
-    if (Number.isInteger(tier) && tier >= 1) tiers[sectionId] = tier;
+/**
+ * A player's section and tier, upgrading the old multi-section shape on the way.
+ *
+ * Before version 4 a player could be ticked into several sections at once.
+ * Almost always that meant "she comes on Tuesdays AND Thursdays" rather than
+ * "she is two different standards", so the single section we keep is the
+ * STRONGEST one. That is the reading that cannot quietly under-rate anybody:
+ * dropped into too gentle a section a player is mismatched every game and the
+ * skill order ranks them against the wrong people, whereas the other way round
+ * is obvious on the night and takes one edit to fix. Playing on a different
+ * night is what borrowing is for, and always was.
+ *
+ * We cannot be sure of the choice, which is why every player it applies to is
+ * recorded for the notice rather than changed silently.
+ */
+function readPlayerSection(rawPlayer, name, sections, knownSectionIds) {
+  // Version 4 onwards: already one section, nothing to work out.
+  if (typeof rawPlayer.section === "string") {
+    return {
+      section: knownSectionIds.has(rawPlayer.section) ? rawPlayer.section : null,
+      tier: cleanUpTier(rawPlayer.tier)
+    };
   }
 
-  return tiers;
+  // What the file SAYS they were in, tidied only of repeats. Deliberately not
+  // filtered to sections we recognise yet: a file can list a section that has
+  // itself been thrown out as unusable, and someone who was in two sections
+  // still had a choice made for them even if only one of the two survived. The
+  // notice has to describe the choice as it was, or it hides the cases most
+  // likely to be wrong.
+  const oldSectionIds = Array.isArray(rawPlayer.sections)
+    ? Array.from(new Set(rawPlayer.sections.filter(function (id) {
+        return typeof id === "string";
+      })))
+    : [];
+
+  if (oldSectionIds.length === 0) return { section: null, tier: undefined };
+
+  const strongest = chooseStrongestSection(
+    oldSectionIds.filter(function (id) { return knownSectionIds.has(id); }),
+    sections);
+
+  if (oldSectionIds.length > 1) {
+    lastMigrationNotes.push({
+      name: name,
+      from: oldSectionIds.map(function (id) {
+        const section = sections.find(function (one) { return one.id === id; });
+        return section === undefined ? id : section.name;
+      }),
+      to: strongest === null ? "no skill level" : strongest.name
+    });
+  }
+
+  if (strongest === null) return { section: null, tier: undefined };
+
+  // The tier that belonged to the section they are being kept in. The others
+  // ranked them against people they are no longer alongside, so they go.
+  const oldTiers = rawPlayer.tiers;
+  const tier = oldTiers && typeof oldTiers === "object"
+    ? cleanUpTier(oldTiers[strongest.id])
+    : undefined;
+
+  return { section: strongest.id, tier: tier };
+}
+
+/**
+ * The strongest of several sections, by the section's own `level` — 1 being
+ * the gentlest. Levels come from the file, and cleanUpData gives any section
+ * missing one a level from its position in the list, which is stored weakest
+ * first. So this works even on a hand-edited file.
+ */
+function chooseStrongestSection(sectionIds, sections) {
+  let strongest = null;
+
+  for (const sectionId of sectionIds) {
+    const section = sections.find(function (one) { return one.id === sectionId; });
+    if (section === undefined) continue;
+    if (strongest === null || section.level > strongest.level) strongest = section;
+  }
+
+  return strongest;
+}
+
+/** A tier number that means something: a whole number, 1 or more. 1 is strongest. */
+function cleanUpTier(rawTier) {
+  return Number.isInteger(rawTier) && rawTier >= 1 ? rawTier : undefined;
 }
 
 /** Keeps only the pairs that are genuinely two player ids, e.g. [["p1","p2"]]. */
@@ -1182,19 +1430,20 @@ function findPlayer(playerId) {
 /** Everyone in a given section, sorted by name so the list is easy to scan. */
 function getPlayersInSection(sectionId) {
   return appData.players
-    .filter(function (player) { return player.sections.indexOf(sectionId) !== -1; })
+    .filter(function (player) { return player.section === sectionId; })
     .sort(function (a, b) { return a.name.localeCompare(b.name); });
 }
 
 /* ---------- Skill order within a section ---------- */
 
 /*
- * Each player carries one tier number per section, in player.tiers[sectionId].
- * Tier 1 is the strongest, and two people on the same number are equals.
+ * Each player carries one tier number, in player.tier. Tier 1 is the
+ * strongest, and two people on the same number are equals. It belongs to the
+ * one section they are in, so it needs no key.
  *
  * Everything reads the order through getTierGroups rather than off the stored
  * numbers, and everything writes it through writeTierGroups, which renumbers
- * from scratch. Nothing else should set player.tiers directly. That is what
+ * from scratch. Nothing else should set player.tier directly. That is what
  * lets the rest of the app ignore gaps and oddities: a number left behind by
  * a deleted player, or a hand-edited file, is closed up in one place.
  */
@@ -1218,7 +1467,7 @@ function getTierGroups(sectionId) {
 
   let weakestTier = 0;
   for (const player of players) {
-    const tier = player.tiers[sectionId];
+    const tier = player.tier;
     if (tier !== undefined && tier > weakestTier) weakestTier = tier;
   }
   if (weakestTier === 0) return [players];
@@ -1235,7 +1484,7 @@ function getTierGroups(sectionId) {
   const byTier = new Map();
 
   for (const player of players) {
-    const ownTier = player.tiers[sectionId];
+    const ownTier = player.tier;
     const tier = ownTier === undefined ? middleTier : ownTier;
     if (!byTier.has(tier)) byTier.set(tier, []);
     byTier.get(tier).push(player);
@@ -1249,16 +1498,13 @@ function getTierGroups(sectionId) {
 /**
  * Writes an ordered list of groups back onto the players, renumbering 1, 2,
  * 3... so the tiers never develop gaps. Empty groups are dropped.
- *
- * Only this section's number is touched. A player's tier in every other
- * section is left exactly as it was.
  */
 function writeTierGroups(sectionId, groups) {
   const kept = groups.filter(function (group) { return group.length > 0; });
 
   kept.forEach(function (group, position) {
     for (const player of group) {
-      player.tiers[sectionId] = position + 1;
+      player.tier = position + 1;
     }
   });
 
@@ -3374,6 +3620,53 @@ function renderPinWarning(violations) {
   messagesElement.appendChild(box);
 }
 
+const migrationNoticeElement = document.getElementById("migrationNotice");
+
+/**
+ * Says who was moved when a saved file with several sections per player was
+ * upgraded to one each, and what they were moved to.
+ *
+ * Everyone kept their STRONGEST section, which is the safer direction: put
+ * somebody in too gentle a section and they are mismatched every game and
+ * ranked against the wrong people, whereas too strong shows up on the night
+ * and takes one edit to fix. It is still a guess about a person, so it is
+ * named out loud rather than done quietly.
+ */
+function renderMigrationNotice() {
+  emptyElement(migrationNoticeElement);
+  if (lastMigrationNotes.length === 0) return;
+
+  const box = createElement("div", "notice");
+  box.appendChild(createElement("p", null,
+    lastMigrationNotes.length === 1
+      ? "One player was in more than one section. A player now has one skill " +
+        "level, so they have been put in their strongest:"
+      : lastMigrationNotes.length + " players were in more than one section. A " +
+        "player now has one skill level, so they have been put in their strongest:"));
+
+  const list = createElement("ul");
+  for (const note of lastMigrationNotes) {
+    list.appendChild(createElement("li", null,
+      note.name + " \u2014 was in " + joinNames(note.from) + ", now " + note.to + "."));
+  }
+  box.appendChild(list);
+
+  box.appendChild(createElement("p", null,
+    "Check these on Manage players and change any that are wrong. Anyone who " +
+    "turns up on a different night is handled by \"Add someone from another " +
+    "section\" instead."));
+
+  const dismiss = createElement("button", "secondary", "Got it");
+  dismiss.type = "button";
+  dismiss.addEventListener("click", function () {
+    lastMigrationNotes = [];
+    emptyElement(migrationNoticeElement);
+  });
+  box.appendChild(dismiss);
+
+  migrationNoticeElement.appendChild(box);
+}
+
 /** "once", "twice", "3 times" — so messages read like English. */
 function describeTimes(count) {
   if (count === 0) return "no times";
@@ -3875,16 +4168,12 @@ function setAllAttendance(shouldBeChecked) {
 const otherSectionSearch = document.getElementById("otherSectionSearch");
 const otherSectionList = document.getElementById("otherSectionList");
 
-/** Names a player's sections for display, e.g. "Novice, Advanced". */
-function describePlayerSections(player) {
-  if (player.sections.length === 0) return "No section";
+/** Names a player's skill level for display, e.g. "Advanced". */
+function describePlayerSection(player) {
+  if (player.section === null) return "No section";
 
-  return player.sections
-    .map(function (sectionId) {
-      const section = findSection(sectionId);
-      return section === null ? sectionId : section.name;
-    })
-    .join(", ");
+  const section = findSection(player.section);
+  return section === null ? player.section : section.name;
 }
 
 /**
@@ -3900,7 +4189,7 @@ function renderOtherSectionList() {
   const searchText = otherSectionSearch.value.trim().toLowerCase();
 
   const outsiders = appData.players
-    .filter(function (player) { return player.sections.indexOf(tonightsSectionId) === -1; })
+    .filter(function (player) { return player.section !== tonightsSectionId; })
     .sort(function (a, b) { return a.name.localeCompare(b.name); });
 
   const matching = outsiders.filter(function (player) {
@@ -3944,7 +4233,7 @@ function renderOtherSectionList() {
 
     const nameCell = createElement("span");
     nameCell.appendChild(document.createTextNode(player.name));
-    nameCell.appendChild(createElement("span", "section-label", describePlayerSections(player)));
+    nameCell.appendChild(createElement("span", "section-label", describePlayerSection(player)));
 
     tick.appendChild(box);
     tick.appendChild(nameCell);
@@ -5244,18 +5533,25 @@ const rosterCount = document.getElementById("rosterCount");
 // Which player the form is currently editing. null means "adding a new one".
 let editingPlayerId = null;
 
-/** Draws the section tick boxes inside the add/edit form. */
+/**
+ * Draws the skill level choices inside the add/edit form.
+ *
+ * Radio buttons, not tick boxes: a player has exactly one standard, and the
+ * control should make the wrong answer unreachable rather than allow it and
+ * complain afterwards.
+ */
 function renderPlayerSectionChoices() {
   emptyElement(playerSectionChoices);
 
   for (const section of appData.sections) {
     const row = createElement("label", "check-row");
 
-    const box = document.createElement("input");
-    box.type = "checkbox";
-    box.value = section.id;
+    const button = document.createElement("input");
+    button.type = "radio";
+    button.name = "playerSection";
+    button.value = section.id;
 
-    row.appendChild(box);
+    row.appendChild(button);
     row.appendChild(createElement("span", null, section.name));
     playerSectionChoices.appendChild(row);
   }
@@ -5267,10 +5563,10 @@ function readChosenGender() {
   return chosen ? chosen.value : null;
 }
 
-/** Reads the ticked section boxes in the form. */
-function readChosenSections() {
-  const ticked = playerSectionChoices.querySelectorAll("input[type='checkbox']:checked");
-  return Array.from(ticked).map(function (box) { return box.value; });
+/** Reads the chosen skill level. Returns a section id, or null if none is picked. */
+function readChosenSection() {
+  const chosen = playerSectionChoices.querySelector("input[type='radio']:checked");
+  return chosen ? chosen.value : null;
 }
 
 /** Puts the form back to "Add a player" with everything blank. */
@@ -5282,8 +5578,8 @@ function resetPlayerForm() {
   document.querySelectorAll("input[name='playerGender']").forEach(function (radio) {
     radio.checked = false;
   });
-  playerSectionChoices.querySelectorAll("input[type='checkbox']").forEach(function (box) {
-    box.checked = false;
+  playerSectionChoices.querySelectorAll("input[type='radio']").forEach(function (button) {
+    button.checked = false;
   });
 
   emptyElement(playerFormMessage);
@@ -5302,8 +5598,8 @@ function startEditingPlayer(playerId) {
   document.querySelectorAll("input[name='playerGender']").forEach(function (radio) {
     radio.checked = radio.value === player.gender;
   });
-  playerSectionChoices.querySelectorAll("input[type='checkbox']").forEach(function (box) {
-    box.checked = player.sections.indexOf(box.value) !== -1;
+  playerSectionChoices.querySelectorAll("input[type='radio']").forEach(function (button) {
+    button.checked = button.value === player.section;
   });
 
   emptyElement(playerFormMessage);
@@ -5317,7 +5613,7 @@ function handleSavePlayerClick() {
 
   const name = playerNameInput.value.trim();
   const gender = readChosenGender();
-  const sections = readChosenSections();
+  const section = readChosenSection();
 
   if (name === "") {
     showNotice(playerFormMessage, "Please enter a name.", "error");
@@ -5341,21 +5637,24 @@ function handleSavePlayerClick() {
       id: makeNewPlayerId(),
       name: name,
       gender: gender,
-      sections: sections,
+      section: section,
       // No tier yet. In a section that has been ranked they show up in the
       // middle until somebody moves them; in one that has not, everybody is
       // equal anyway.
-      tiers: {}
+      tier: undefined
     });
   } else {
     const player = findPlayer(editingPlayerId);
+    const movedSection = player.section !== section;
+
     player.name = name;
     player.gender = gender;
-    player.sections = sections;
+    player.section = section;
 
-    // Leaving a section drops the skill order that went with it, exactly as
-    // a reload would. Rejoining later starts them in the middle again.
-    player.tiers = cleanUpTiers(player.tiers, sections);
+    // Moving up or down a level drops the skill order that went with the old
+    // one: it ranked them against people they are no longer alongside. They
+    // start in the middle of the new section until somebody moves them.
+    if (movedSection) player.tier = undefined;
   }
 
   const wasEditing = editingPlayerId !== null;
@@ -5593,10 +5892,9 @@ function playerMatchesSearch(player, searchText) {
 /**
  * Draws the roster, grouped by section, honouring the search and filter.
  *
- * Someone in two sections appears under both headings — that is one person
- * shown twice, not two records. Editing either row edits the same player.
- * The "showing X of Y" count therefore counts PEOPLE, not rows, so it never
- * exceeds the roster size.
+ * Everyone appears under exactly one heading, since a player has one skill
+ * level. The count is still of PEOPLE rather than rows, which now amounts to
+ * the same thing but keeps the number honest if that ever changes again.
  */
 function renderRoster() {
   emptyElement(rosterList);
@@ -5638,11 +5936,11 @@ function renderRoster() {
     rosterList.appendChild(group);
   }
 
-  // Anyone with no sections would otherwise be invisible and unreachable.
+  // Anyone with no section would otherwise be invisible and unreachable.
   if (chosenSection === "all") {
     const unassigned = appData.players
       .filter(function (player) {
-        return player.sections.length === 0 && playerMatchesSearch(player, searchText);
+        return player.section === null && playerMatchesSearch(player, searchText);
       })
       .sort(function (a, b) { return a.name.localeCompare(b.name); });
 
@@ -5650,9 +5948,11 @@ function renderRoster() {
 
     if (unassigned.length > 0) {
       const group = createElement("div", "roster-group");
-      group.appendChild(createElement("h3", null, "No section yet (" + unassigned.length + ")"));
+      group.appendChild(createElement("h3", null, "No skill level yet (" + unassigned.length + ")"));
       group.appendChild(createElement("p", "hint",
-        "These players won't appear on the session screen until they are put in a section."));
+        "These players aren't in any section's list, so they won't be ticked " +
+        "off on the session screen until they are given a skill level. You can " +
+        "still pull them in for one night with \"Add someone from another section\"."));
       for (const player of unassigned) {
         group.appendChild(renderRosterRow(player));
       }
@@ -5997,6 +6297,10 @@ function handleImportFileChosen(event) {
     renderHistorySummary();
     clearScreen();
 
+    // An older backup may have had people in several sections at once. If it
+    // did, cleanUpData has just picked one each, and this says who.
+    renderMigrationNotice();
+
     showNotice(backupMessage,
       "Imported " + appData.players.length + " player(s) and " +
       appData.history.length + " saved session(s).", "success");
@@ -6274,7 +6578,12 @@ const tabSession = document.getElementById("tabSession");
 const tabManage = document.getElementById("tabManage");
 const tabHistory = document.getElementById("tabHistory");
 
+// Which tab is open. Only the bug report reads this — everything else asks the
+// screens themselves — but a report is useless without knowing where you were.
+let currentScreenName = "session";
+
 function showScreen(screenName) {
+  currentScreenName = screenName;
   sessionScreen.hidden = screenName !== "session";
   manageScreen.hidden = screenName !== "manage";
   historyScreen.hidden = screenName !== "history";
@@ -6323,7 +6632,201 @@ renderConflictList();
 renderHistorySectionPicker();
 renderHistoryList();
 renderHistorySummary();
+
+// If the saved file was an older one with several sections per player, loadData
+// has already narrowed each of them to one. Say so, then write the new shape
+// back so the upgrade happens once and the notice does not return tomorrow.
+renderMigrationNotice();
+if (lastMigrationNotes.length > 0) saveData();
+
 showScreen("session");
+
+
+/* =========================================================================
+   SECTION 13 — THE BUG REPORT
+
+   Deliberately has no server behind it. There is no fetch, no XHR and no
+   third-party form service anywhere in this file, which means the button works
+   in a sports hall with no signal: "Email report" hands the finished message to
+   the mail app, which sends it whenever the phone next finds a connection, and
+   "Copy report" needs no connection at all.
+
+   The context is COUNTS ONLY. No names, no roster, no keep-apart pairs, no
+   saved sessions — a bug report should never be a quiet export of the club's
+   data. It is also shown in full in the panel before either button is pressed,
+   so nobody has to take that on trust.
+   ========================================================================= */
+
+const bugButton = document.getElementById("bugButton");
+const bugPanel = document.getElementById("bugPanel");
+const bugDescription = document.getElementById("bugDescription");
+const bugContext = document.getElementById("bugContext");
+const bugMessage = document.getElementById("bugMessage");
+
+const BUG_SUBJECT = "Pickleball scheduler bug report";
+
+/**
+ * The address, built at runtime.
+ *
+ * This file lives in a public repository, and address scrapers read the raw
+ * HTML. Sticking the pieces together in JavaScript will not defeat a determined
+ * one, but it does defeat the ones that simply pattern-match text.
+ */
+function bugReportAddress() {
+  return ["nicholas", ".", "ivanov100", "@", "gmail", ".", "com"].join("");
+}
+
+/**
+ * Everything we can say about the state of the app without saying anything
+ * about the people in it.
+ *
+ * Each entry is a label and a value. One list, used three times over: shown in
+ * the panel, put in the email, and put on the clipboard — so what you read is
+ * exactly what you send.
+ */
+function collectBugContext() {
+  const screenNames = { session: "Session", manage: "Manage players", history: "History" };
+  const section = findSection(sectionPicker.value);
+
+  return [
+    ["Tab", screenNames[currentScreenName] || currentScreenName],
+    ["Section", section === null ? "none chosen" : section.name],
+    ["Players tonight", String(getSelectedPlayers().length)],
+    ["Courts", String(readNumberInput("numCourts", 4))],
+    ["Rounds", String(getRoundCount())],
+    ["Current round", String(currentRound)],
+    ["Schedule generated", lastGeneratedSession === null ? "no" : "yes"],
+    ["Storage version", String(appData.version)],
+    ["Screen width", window.innerWidth + "px"],
+    ["Browser and OS", navigator.userAgent],
+    ["Last error", lastScriptError === null ? "none" : lastScriptError]
+  ];
+}
+
+function formatBugContext(contextLines) {
+  return contextLines.map(function (line) {
+    return line[0] + ": " + line[1];
+  }).join("\n");
+}
+
+/** The whole message, description first because that is the part worth reading. */
+function buildBugReportText() {
+  return "WHAT HAPPENED\n" +
+         bugDescription.value.trim() + "\n\n" +
+         "CONTEXT\n" +
+         formatBugContext(collectBugContext()) + "\n";
+}
+
+function renderBugContext() {
+  bugContext.textContent = formatBugContext(collectBugContext());
+}
+
+/** Refuses politely rather than sending an empty report. */
+function bugDescriptionIsMissing() {
+  if (bugDescription.value.trim() !== "") return false;
+
+  emptyElement(bugMessage);
+  showNotice(bugMessage, "Say what happened first — an empty report can't be " +
+                         "acted on.", "error");
+  bugDescription.focus();
+  return true;
+}
+
+function openBugPanel() {
+  emptyElement(bugMessage);
+  renderBugContext(); // read fresh: the state may have moved since last time
+  bugPanel.hidden = false;
+  bugButton.setAttribute("aria-expanded", "true");
+  bugDescription.focus();
+}
+
+function closeBugPanel() {
+  bugPanel.hidden = true;
+  bugButton.setAttribute("aria-expanded", "false");
+  // Otherwise a keyboard user is left focused on a box that is no longer there.
+  bugButton.focus();
+}
+
+function handleBugEmailClick() {
+  if (bugDescriptionIsMissing()) return;
+
+  // mailto opens the mail app with everything filled in. It does not send, and
+  // it does not need a connection — the message simply waits in the outbox.
+  // The address goes in as it is. Percent-encoding the @ is legal but some mail
+  // apps show it raw, and "nicholas.ivanov100%40gmail.com" looks like a fault.
+  const link = "mailto:" + bugReportAddress() +
+               "?subject=" + encodeURIComponent(BUG_SUBJECT) +
+               "&body=" + encodeURIComponent(buildBugReportText());
+
+  window.location.href = link;
+
+  emptyElement(bugMessage);
+  showNotice(bugMessage, "Your mail app should be opening with the report " +
+                         "filled in. You still have to press send.", "success");
+}
+
+/**
+ * Puts text on the clipboard.
+ *
+ * The modern clipboard API is only offered on secure origins, and this app is
+ * meant to be opened as a file, so the old selection-and-copy trick is kept as
+ * the fallback rather than leaving the button dead.
+ */
+function copyTextToClipboard(text, onDone) {
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(function () { onDone(true); },
+                                             function () { onDone(false); });
+    return;
+  }
+
+  const holder = document.createElement("textarea");
+  holder.value = text;
+  holder.setAttribute("readonly", "readonly");
+  holder.style.position = "fixed";
+  holder.style.top = "-1000px";
+  document.body.appendChild(holder);
+  holder.select();
+
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch (error) {
+    copied = false;
+  }
+  document.body.removeChild(holder);
+  onDone(copied);
+}
+
+function handleBugCopyClick() {
+  if (bugDescriptionIsMissing()) return;
+
+  copyTextToClipboard(buildBugReportText(), function (copied) {
+    emptyElement(bugMessage);
+    if (copied) {
+      showNotice(bugMessage, "Report copied. Paste it wherever suits — a " +
+                             "message, an email, a note.", "success");
+      return;
+    }
+    showNotice(bugMessage, "This browser wouldn't let the page copy. Select " +
+                           "the text above and copy it by hand.", "error");
+  });
+}
+
+bugButton.addEventListener("click", function () {
+  if (bugPanel.hidden) openBugPanel();
+  else closeBugPanel();
+});
+
+document.getElementById("bugCloseButton").addEventListener("click", closeBugPanel);
+document.getElementById("bugEmailButton").addEventListener("click", handleBugEmailClick);
+document.getElementById("bugCopyButton").addEventListener("click", handleBugCopyClick);
+
+// Escape closes it, the same as any other panel that sits over the page.
+document.addEventListener("keydown", function (event) {
+  if (event.key === "Escape" && !bugPanel.hidden) closeBugPanel();
+});
+
+
 </script>
 
 </body>
